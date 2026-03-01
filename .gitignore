@@ -1,0 +1,29 @@
+# === Build artifacts ===
+.build/
+*.app
+DerivedData/
+
+# === Bundled binaries (too large for git, download via setup script) ===
+CrateDigr/Resources/Binaries/yt-dlp
+CrateDigr/Resources/Binaries/ffmpeg
+CrateDigr/Resources/Binaries/deno
+CrateDigr/Resources/Binaries/demucs_mt
+CrateDigr/Resources/Binaries/ggml-model-htdemucs-4s-f16.bin
+
+# === macOS junk ===
+.DS_Store
+**/.DS_Store
+*.swp
+*~
+
+# === Xcode ===
+xcuserdata/
+*.xcworkspace/
+*.xcodeproj/xcuserdata/
+
+# === Generated files ===
+icon_preview.png
+AppIcon.iconset/
+
+# === Claude internal ===
+.claude/

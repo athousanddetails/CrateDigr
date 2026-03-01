@@ -1,0 +1,98 @@
+[
+  {
+    "id": "boombap_exorcist",
+    "name": "Dusty Break 78",
+    "genre": "Boom-bap",
+    "bpm": 78,
+    "file": "boombap_exorcist.wav",
+    "attribution": "Exorcist (freesound.org) CC-BY 3.0"
+  },
+  {
+    "id": "boombap_tattoo",
+    "name": "Boom Bap Beats",
+    "genre": "Boom-bap",
+    "bpm": 100,
+    "file": "boombap_tattoo.wav",
+    "attribution": ""
+  },
+  {
+    "id": "boombap_simmys",
+    "name": "Boom Bap Loop 88",
+    "genre": "Boom-bap",
+    "bpm": 88,
+    "file": "boombap_simmys.wav",
+    "attribution": "simmys_recycle_bin (freesound.org) CC-BY 4.0"
+  },
+  {
+    "id": "techno_dtd",
+    "name": "DTD Drumloop 16",
+    "genre": "Techno",
+    "bpm": 138,
+    "file": "techno_dtd.wav",
+    "attribution": ""
+  },
+  {
+    "id": "techno_cyclez",
+    "name": "Hard Techno 140",
+    "genre": "Techno",
+    "bpm": 140,
+    "file": "techno_cyclez.wav",
+    "attribution": "Cyclez (freesound.org) CC-BY 4.0"
+  },
+  {
+    "id": "techno_beatmatch",
+    "name": "Classic Techno 130",
+    "genre": "Techno",
+    "bpm": 130,
+    "file": "techno_beatmatch.wav",
+    "attribution": "BEATMATCH_info (freesound.org) CC-BY 4.0"
+  },
+  {
+    "id": "house_loopcult",
+    "name": "House Groove 124",
+    "genre": "House",
+    "bpm": 124,
+    "file": "house_loopcult.wav",
+    "attribution": ""
+  },
+  {
+    "id": "kick_victek_909",
+    "name": "909 Rumble Kick 130",
+    "genre": "Kick",
+    "bpm": 130,
+    "file": "kick_victek_909.wav",
+    "attribution": "Victek (freesound.org) CC-BY 4.0"
+  },
+  {
+    "id": "kick_jomox_909",
+    "name": "Jomox 909 Kick",
+    "genre": "Kick",
+    "bpm": 130,
+    "file": "kick_jomox_909.aiff",
+    "attribution": "AndreasFLorin (freesound.org) CC0"
+  },
+  {
+    "id": "kick_dtd_4",
+    "name": "DTD Kick Loop 4",
+    "genre": "Kick",
+    "bpm": 138,
+    "file": "kick_dtd_4.wav",
+    "attribution": ""
+  },
+  {
+    "id": "kick_dtd_16",
+    "name": "DTD Kick Loop 16",
+    "genre": "Kick",
+    "bpm": 138,
+    "file": "kick_dtd_16.wav",
+    "attribution": ""
+  },
+  {
+    "id": "kick_dtd_17",
+    "name": "DTD Kick Loop 17",
+    "genre": "Kick",
+    "bpm": 138,
+    "file": "kick_dtd_17.wav",
+    "attribution": ""
+  }
+]
