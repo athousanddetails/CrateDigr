@@ -97,13 +97,28 @@ final class SampleExporter {
 
     func exportFullFile(
         inputPath: URL,
+        outputURL: URL,
+        options: ExportOptions
+    ) async throws -> URL {
+        return try await exportFullFile(inputPath: inputPath, outputPath: outputURL, options: options)
+    }
+
+    func exportFullFile(
+        inputPath: URL,
         outputDir: URL,
         filename: String,
         options: ExportOptions
     ) async throws -> URL {
         let outputPath = outputDir.appendingPathComponent(filename)
             .appendingPathExtension(options.format.fileExtension)
+        return try await exportFullFile(inputPath: inputPath, outputPath: outputPath, options: options)
+    }
 
+    private func exportFullFile(
+        inputPath: URL,
+        outputPath: URL,
+        options: ExportOptions
+    ) async throws -> URL {
         if options.speedRatio != 1.0 || options.pitchSemitones != 0 {
             try await exportWithPitchSpeed(inputPath: inputPath, outputPath: outputPath, options: options)
         } else {
@@ -135,6 +150,16 @@ final class SampleExporter {
 
     func exportRegion(
         inputPath: URL,
+        outputURL: URL,
+        startSeconds: Double,
+        durationSeconds: Double,
+        options: ExportOptions
+    ) async throws -> URL {
+        return try await exportRegion(inputPath: inputPath, outputPath: outputURL, startSeconds: startSeconds, durationSeconds: durationSeconds, options: options)
+    }
+
+    func exportRegion(
+        inputPath: URL,
         outputDir: URL,
         filename: String,
         startSeconds: Double,
@@ -143,7 +168,16 @@ final class SampleExporter {
     ) async throws -> URL {
         let outputPath = outputDir.appendingPathComponent(filename)
             .appendingPathExtension(options.format.fileExtension)
+        return try await exportRegion(inputPath: inputPath, outputPath: outputPath, startSeconds: startSeconds, durationSeconds: durationSeconds, options: options)
+    }
 
+    private func exportRegion(
+        inputPath: URL,
+        outputPath: URL,
+        startSeconds: Double,
+        durationSeconds: Double,
+        options: ExportOptions
+    ) async throws -> URL {
         let needsPitchSpeed = options.speedRatio != 1.0 || options.pitchSemitones != 0
 
         if needsPitchSpeed {

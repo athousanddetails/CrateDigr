@@ -73,10 +73,8 @@ codesign --force --sign - "$MACOS/$APP_NAME"
 echo ""
 echo "App bundle created at: $APP_BUNDLE"
 
-# Copy versioned app to project root
-VERSION="2.16"
-VERSIONED_APP="${APP_NAME}_v${VERSION}.app"
-rm -rf "$VERSIONED_APP"
-cp -R "$APP_BUNDLE" "$VERSIONED_APP"
-echo "Copied to: $VERSIONED_APP"
-echo "To run: open $VERSIONED_APP"
+# Copy app to project root
+rm -rf "$APP_NAME.app"
+cp -R "$APP_BUNDLE" "$APP_NAME.app"
+echo "Copied to: $APP_NAME.app"
+echo "To run: open $APP_NAME.app"

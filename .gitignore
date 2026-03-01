@@ -25,5 +25,8 @@ xcuserdata/
 icon_preview.png
 AppIcon.iconset/
 
-# === Claude internal ===
+# === Claude / dev internal ===
 .claude/
+CLAUDE.md
+tasks/
+generate_icon.py

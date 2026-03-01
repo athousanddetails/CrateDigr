@@ -104,7 +104,7 @@ final class SamplerViewModel: ObservableObject {
     // MARK: - Export
     @Published var exportProgress: Double = 0
     @Published var isExporting = false
-    @Published var exportFolder: URL = AppConstants.defaultOutputFolder
+    // Export folder removed — NSSavePanel handles location selection
 
     // MARK: - Grid / BPM / Metronome
     @Published var manualBPM: Double = 120
@@ -922,26 +922,18 @@ final class SamplerViewModel: ObservableObject {
     // MARK: - Export
 
     /// Build the effective BPM tag for exported filenames
-    private func effectiveBPMTag() -> String {
-        guard let bpm = sampleFile?.bpm, bpm > 0 else { return "" }
-        let eBPM = Int(round(Double(bpm) * speed))
-        return "\(eBPM)bpm"
-    }
-
-    func exportSlices(options: SampleExporter.ExportOptions, customFilename: String? = nil) {
+    func exportSlices(options: SampleExporter.ExportOptions, outputDir: URL, baseName: String) {
         guard let sf = sampleFile, !sliceMarkers.isEmpty else { return }
 
         isExporting = true
         exportProgress = 0
-
-        let baseName = customFilename ?? "\(sf.filename)_\(effectiveBPMTag())"
 
         Task {
             do {
                 let positions = sliceMarkers.map(\.samplePosition)
                 _ = try await exporter.exportSlices(
                     inputPath: sf.url,
-                    outputDir: exportFolder,
+                    outputDir: outputDir,
                     baseName: baseName,
                     slicePositions: positions,
                     sampleRate: sf.sampleRate,
@@ -959,14 +951,11 @@ final class SamplerViewModel: ObservableObject {
         }
     }
 
-    func exportLoopRegion(options: SampleExporter.ExportOptions, customFilename: String? = nil) {
+    func exportLoopRegion(options: SampleExporter.ExportOptions, outputURL: URL) {
         guard let sf = sampleFile, let region = loopRegion else { return }
 
         isExporting = true
         exportProgress = 0
-
-        let bpmTag = effectiveBPMTag()
-        let filename = customFilename ?? "\(sf.filename)_loop_\(bpmTag)"
 
         Task {
             do {
@@ -975,8 +964,7 @@ final class SamplerViewModel: ObservableObject {
 
                 _ = try await exporter.exportRegion(
                     inputPath: sf.url,
-                    outputDir: exportFolder,
-                    filename: filename,
+                    outputURL: outputURL,
                     startSeconds: startSec,
                     durationSeconds: durSec,
                     options: options
@@ -989,19 +977,17 @@ final class SamplerViewModel: ObservableObject {
         }
     }
 
-    func exportFull(options: SampleExporter.ExportOptions, customFilename: String? = nil) {
+    func exportFull(options: SampleExporter.ExportOptions, outputURL: URL) {
         guard let sf = sampleFile else { return }
 
         isExporting = true
-        let bpmTag = effectiveBPMTag()
-        let filename = customFilename ?? "\(sf.filename)_\(bpmTag)"
+        exportProgress = 0
 
         Task {
             do {
                 _ = try await exporter.exportFullFile(
                     inputPath: sf.url,
-                    outputDir: exportFolder,
-                    filename: filename,
+                    outputURL: outputURL,
                     options: options
                 )
                 self.exportProgress = 1.0

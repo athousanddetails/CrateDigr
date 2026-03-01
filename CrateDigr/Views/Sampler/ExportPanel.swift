@@ -1,9 +1,10 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ExportPanel: View {
     @EnvironmentObject var vm: SamplerViewModel
 
-    @State private var exportMode: ExportMode = .slices
+    @State private var exportMode: ExportMode = .loop
     @State private var sampleRate: Int = 48000
     @State private var bitDepth: Int = 16
     @State private var maxDuration: Double = 66
@@ -13,11 +14,9 @@ struct ExportPanel: View {
     @State private var normalize = false
     @State private var includeLoFi = false
     @State private var includeTempoEffects = true
-    @State private var customFilename: String = ""
-
     enum ExportMode: String, CaseIterable, Identifiable {
-        case full = "Full File"
         case loop = "Loop Region"
+        case full = "Full File"
         case slices = "Slices"
 
         var id: String { rawValue }
@@ -61,31 +60,6 @@ struct ExportPanel: View {
                     let durationSec = Double(region.length) / sf.sampleRate
                     Text("Duration: \(String(format: "%.2f", durationSec))s")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            // Filename
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Filename")
-                    .fontWeight(.medium)
-                HStack {
-                    TextField("Auto-generated", text: $customFilename)
-                        .textFieldStyle(.roundedBorder)
-                    if let bpm = vm.sampleFile?.bpm {
-                        let effectiveBPM = Int(round(Double(bpm) * vm.speed))
-                        Text("\(effectiveBPM)bpm")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.orange.opacity(0.1))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                    }
-                }
-                if !customFilename.isEmpty {
-                    Text("Leave empty for auto-generated name")
-                        .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -216,20 +190,6 @@ struct ExportPanel: View {
 
             Divider()
 
-            // Output folder
-            HStack {
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(.secondary)
-                Text(vm.exportFolder.path)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                Button("Choose...") { chooseExportFolder() }
-                    .controlSize(.small)
-            }
-
             // Export button
             HStack {
                 Button(action: { performExport() }) {
@@ -347,29 +307,47 @@ struct ExportPanel: View {
         return options
     }
 
-    private func performExport() {
-        let options = buildOptions()
-        let filename = customFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = filename.isEmpty ? nil : filename
+    private func suggestedFilename() -> String {
+        guard let sf = vm.sampleFile else { return "export" }
+        let bpmTag = effectiveBPMTag()
 
         switch exportMode {
         case .full:
-            vm.exportFull(options: options, customFilename: name)
+            return "\(sf.filename)_\(bpmTag)"
         case .loop:
-            vm.exportLoopRegion(options: options, customFilename: name)
+            return "\(sf.filename)_loop_\(bpmTag)"
         case .slices:
-            vm.exportSlices(options: options, customFilename: name)
+            return "\(sf.filename)_\(bpmTag)"
         }
     }
 
-    private func chooseExportFolder() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose Export Folder"
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
+    private func effectiveBPMTag() -> String {
+        guard let bpm = vm.sampleFile?.bpm, bpm > 0 else { return "" }
+        let eBPM = Int(round(Double(bpm) * vm.speed))
+        return "\(eBPM)bpm"
+    }
+
+    private func performExport() {
+        let options = buildOptions()
+
+        let panel = NSSavePanel()
+        panel.title = "Export"
+        panel.nameFieldStringValue = suggestedFilename() + ".wav"
+        panel.allowedContentTypes = [.wav]
         panel.canCreateDirectories = true
-        if panel.runModal() == .OK, let url = panel.url {
-            vm.exportFolder = url
+        panel.isExtensionHidden = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        switch exportMode {
+        case .full:
+            vm.exportFull(options: options, outputURL: url)
+        case .loop:
+            vm.exportLoopRegion(options: options, outputURL: url)
+        case .slices:
+            let baseName = url.deletingPathExtension().lastPathComponent
+            let outputDir = url.deletingLastPathComponent()
+            vm.exportSlices(options: options, outputDir: outputDir, baseName: baseName)
         }
     }
 }
