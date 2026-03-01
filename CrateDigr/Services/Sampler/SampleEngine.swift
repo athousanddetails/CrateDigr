@@ -232,7 +232,7 @@ final class SampleEngine: ObservableObject {
                 // Ignore stale completions from previous schedules
                 guard self.scheduleGeneration == myGeneration else { return }
                 if self.isLooping, let region = self.loopRegion {
-                    self.play(from: region.startSample)
+                    self.playRegion(region, loop: true)
                 } else {
                     self.stop()
                 }
@@ -251,7 +251,6 @@ final class SampleEngine: ObservableObject {
         self.isLooping = loop
 
         scheduleGeneration += 1
-        let myGeneration = scheduleGeneration
 
         playerNode.stop()
         updatePitchSpeedNodes()
@@ -265,13 +264,15 @@ final class SampleEngine: ObservableObject {
 
         guard let segmentBuffer = createSubBuffer(from: buffer, startFrame: startFrame, frameCount: frameCount) else { return }
 
-        playerNode.scheduleBuffer(segmentBuffer) { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                guard self.scheduleGeneration == myGeneration else { return }
-                if self.isLooping, let currentRegion = self.loopRegion {
-                    self.playRegion(currentRegion, loop: true)
-                } else {
+        if loop {
+            // Gapless looping — AVFoundation handles seamless repeats internally
+            playerNode.scheduleBuffer(segmentBuffer, at: nil, options: .loops, completionHandler: nil)
+        } else {
+            let myGeneration = scheduleGeneration
+            playerNode.scheduleBuffer(segmentBuffer) { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    guard self.scheduleGeneration == myGeneration else { return }
                     self.stop()
                 }
             }
@@ -294,29 +295,28 @@ final class SampleEngine: ObservableObject {
         currentPosition = max(0, position)
         if isPlaying {
             if isLooping, let region = loopRegion {
-                // Seeking while looping: clamp to loop region and restart loop playback
+                // Seeking while looping: clamp to loop region
                 let clampedPos = max(region.startSample, min(position, region.endSample - 1))
 
                 scheduleGeneration += 1
-                let myGeneration = scheduleGeneration
 
                 playerNode.stop()
                 updatePitchSpeedNodes()
                 playbackStartSample = clampedPos
                 currentPosition = clampedPos
+
                 guard let buffer = audioBuffer else { return }
-                guard let segmentBuffer = createSubBuffer(from: buffer, startFrame: clampedPos, frameCount: region.endSample - clampedPos) else { return }
-                playerNode.scheduleBuffer(segmentBuffer) { [weak self] in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        guard self.scheduleGeneration == myGeneration else { return }
-                        if self.isLooping, let currentRegion = self.loopRegion {
-                            self.playRegion(currentRegion, loop: true)
-                        } else {
-                            self.stop()
-                        }
-                    }
-                }
+
+                // Schedule remainder (seekPos → end of region) without .loops
+                let remainderCount = region.endSample - clampedPos
+                guard remainderCount > 0 else { return }
+                guard let remainderBuffer = createSubBuffer(from: buffer, startFrame: clampedPos, frameCount: remainderCount) else { return }
+                playerNode.scheduleBuffer(remainderBuffer, at: nil, options: [], completionHandler: nil)
+
+                // Then schedule full loop buffer with .loops — plays after remainder finishes
+                guard let loopBuffer = createSubBuffer(from: buffer, startFrame: region.startSample, frameCount: region.length) else { return }
+                playerNode.scheduleBuffer(loopBuffer, at: nil, options: .loops, completionHandler: nil)
+
                 playerNode.play()
             } else {
                 play(from: currentPosition)
@@ -335,41 +335,12 @@ final class SampleEngine: ObservableObject {
         self.loopRegion = region
     }
 
-    /// Seamlessly restart loop playback from a specific position within the loop.
+    /// Seamlessly restart loop playback when loop region changes.
     /// Used when loop size changes and playhead needs to wrap (Traktor/Rekordbox behavior).
-    /// Minimizes audio gap by scheduling the new buffer before stopping the old one.
     func seamlessLoopRestart(region: LoopRegion, from position: Int) {
-        guard let buffer = audioBuffer else { return }
-
-        self.loopRegion = region
-        self.isLooping = true
-
-        scheduleGeneration += 1
-        let myGeneration = scheduleGeneration
-
-        let startFrame = position
-        let frameCount = region.endSample - position
-
-        guard frameCount > 0 else { return }
-        guard let segmentBuffer = createSubBuffer(from: buffer, startFrame: startFrame, frameCount: frameCount) else { return }
-
-        playbackStartSample = startFrame
-        currentPosition = startFrame
-
-        // Stop current playback and immediately reschedule
-        playerNode.stop()
-        playerNode.scheduleBuffer(segmentBuffer) { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                guard self.scheduleGeneration == myGeneration else { return }
-                if self.isLooping, let currentRegion = self.loopRegion {
-                    self.playRegion(currentRegion, loop: true)
-                } else {
-                    self.stop()
-                }
-            }
-        }
-        playerNode.play()
+        // Delegate to playRegion which uses .loops for gapless repeats.
+        // The one-time stop/restart is acceptable for user-initiated loop-resize actions.
+        playRegion(region, loop: true)
     }
 
     // MARK: - Pitch/Speed
@@ -669,9 +640,21 @@ final class SampleEngine: ObservableObject {
               let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else { return }
 
         let sampleTime = Int(playerTime.sampleTime)
-        let newPosition = playbackStartSample + sampleTime
-        if newPosition != currentPosition {
-            currentPosition = max(0, newPosition)
+
+        if isLooping, let region = loopRegion, region.length > 0 {
+            // With .loops, sampleTime continuously increments past buffer length.
+            // Account for seek offset within the loop (playbackStartSample may differ from region.startSample).
+            let offsetInLoop = max(0, playbackStartSample - region.startSample)
+            let posInLoop = (offsetInLoop + sampleTime) % region.length
+            let newPosition = region.startSample + posInLoop
+            if newPosition != currentPosition {
+                currentPosition = newPosition
+            }
+        } else {
+            let newPosition = playbackStartSample + sampleTime
+            if newPosition != currentPosition {
+                currentPosition = max(0, newPosition)
+            }
         }
     }
 

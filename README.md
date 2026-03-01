@@ -1,6 +1,8 @@
 # Crate Digr
 
-A native macOS app for downloading YouTube audio, sampling, and AI stem separation. Built for music producers and crate diggers.
+An OPEN SOURCE native macOS app for downloading YouTube audio, sampling, and AI stem separation. Built for music producers and crate diggers.
+
+Totally Vibe Coded, so expect a bit of AI Slop lmao
 
 **Apple Silicon only** | **macOS 14+** | **SwiftUI + SPM**
 
@@ -44,9 +46,8 @@ cd CrateDigr
 # 2. Download required binaries (~270MB)
 bash setup-binaries.sh
 
-# 3. Build and run
+# 3. Build
 bash build-app.sh
-open CrateDigr_v2.16.app
 ```
 
 ### Download Compiled App

@@ -170,7 +170,7 @@ struct ExportPanel: View {
                     HStack {
                         Text("Pitch / Speed")
                         if vm.speed != 1.0 || vm.pitchSemitones != 0 {
-                            Text("(\(vm.speed != 1.0 ? String(format: "%.0f%%", vm.speed * 100) : "")\(vm.pitchSemitones != 0 ? String(format: " %+.0fst", vm.pitchSemitones) : ""))")
+                            Text("(\(pitchSpeedSummary))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -305,6 +305,24 @@ struct ExportPanel: View {
         }
 
         return options
+    }
+
+    private var pitchSpeedSummary: String {
+        let pct = (vm.speed - 1.0) * 100.0
+        switch vm.pitchSpeedMode {
+        case .turntable:
+            return String(format: "%+.0f%% Repitch", pct)
+        case .independent:
+            var parts: [String] = []
+            if vm.speed != 1.0 { parts.append(String(format: "%+.0f%% Speed", pct)) }
+            if vm.pitchSemitones != 0 { parts.append(String(format: "%+.0fst Pitch", vm.pitchSemitones)) }
+            return parts.joined(separator: ", ")
+        default:
+            var parts: [String] = []
+            if vm.speed != 1.0 { parts.append(String(format: "%+.0f%% Speed", pct)) }
+            if vm.pitchSemitones != 0 { parts.append(String(format: "%+.0fst Pitch", vm.pitchSemitones)) }
+            return parts.joined(separator: ", ")
+        }
     }
 
     private func suggestedFilename() -> String {

@@ -15,10 +15,17 @@ final class TimeStretchService {
         sampleRate: Int = 48000,
         eqFilter: String? = nil
     ) async throws {
-        // asetrate changes the sample rate interpretation (pitch+speed coupled)
-        // aresample brings it back to target sample rate
+        // asetrate trick: declares a new sample rate without resampling, then aresample
+        // converts back. Speed factor = declaredRate / actualInputRate.
+        //
+        // Problem: input file may be at ANY sample rate (44100, 48000, etc).
+        // Fix: first aresample to target rate so the input is normalized,
+        // then asetrate with (targetRate * speedRatio), then aresample back.
+        //
+        // speedRatio=0.94 → newRate=45120 → speed = 45120/48000 = 0.94 (slower+lower) ✓
+        // speedRatio=1.06 → newRate=50880 → speed = 50880/48000 = 1.06 (faster+higher) ✓
         let newRate = Int(Double(sampleRate) * speedRatio)
-        var filter = "asetrate=\(newRate),aresample=\(sampleRate)"
+        var filter = "aresample=\(sampleRate),asetrate=\(newRate),aresample=\(sampleRate)"
         if let eq = eqFilter {
             filter += ",\(eq)"
         }

@@ -306,7 +306,11 @@ struct WaveformView: View {
                     }
                 }
                 .onEnded { _ in
-                    // When drag ends, if playing and looping, reschedule with final region
+                    // Apply zero-crossing snapping to the final loop position
+                    if let region = vm.loopRegion {
+                        vm.setLoopRegion(start: region.startSample, end: region.endSample)
+                    }
+                    // Reschedule gapless loop playback with the snapped region
                     if vm.isPlaying && vm.loopEnabled, let region = vm.loopRegion {
                         vm.engine.playRegion(region, loop: true)
                     }
