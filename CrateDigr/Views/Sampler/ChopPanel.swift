@@ -24,6 +24,7 @@ struct ChopPanel: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .disabled(vm.sliceMarkers.isEmpty)
+                    .help("Remove all slice markers")
             }
 
             // Mode selector
@@ -33,6 +34,7 @@ struct ChopPanel: View {
                 }
             }
             .pickerStyle(.segmented)
+            .help("Transient: auto-detect hits — Grid: even bar splits — Manual: click to place")
 
             Divider()
 
@@ -60,6 +62,7 @@ struct ChopPanel: View {
                 Text("Sensitivity")
                     .foregroundStyle(.secondary)
                 Slider(value: $vm.chopSensitivity, in: 0...1, step: 0.05)
+                    .help("Lower = more slices, Higher = fewer slices")
                 Text(vm.chopSensitivity < 0.3 ? "Many" : vm.chopSensitivity > 0.7 ? "Few" : "Medium")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -72,6 +75,7 @@ struct ChopPanel: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
             .disabled(vm.sampleFile == nil)
+            .help("Scan audio for transients and place slice markers")
 
             Text("Detects attack transients in the audio and places slice markers at zero-crossings")
                 .font(.caption)
@@ -94,6 +98,7 @@ struct ChopPanel: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .disabled(vm.sampleFile == nil || vm.sampleFile?.bpm == nil)
+                    .help("Chop into \(barLabel(bars)) slices")
                 }
             }
 

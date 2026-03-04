@@ -12,6 +12,7 @@ struct TransportBar: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.space, modifiers: [])
+            .help(vm.isPlaying ? "Stop (Space)" : "Play (Space)")
 
             // Time display
             Text(vm.currentTimeString)
@@ -51,6 +52,7 @@ struct TransportBar: View {
                 }
                 .pickerStyle(.menu)
                 .frame(width: 72)
+                .help("Loop length — Free or snap to bar count")
                 .onChange(of: vm.loopMode) { _, _ in
                     vm.applyLoopMode()
                 }
@@ -90,6 +92,7 @@ struct TransportBar: View {
 
                 BPMTextField(bpm: $vm.manualBPM, onCommit: { vm.applyManualBPM() })
                     .frame(width: 55)
+                    .help("BPM — type a value and press Enter to set")
 
                 Button(action: { vm.tapTempo() }) {
                     Text("TAP")
@@ -238,6 +241,7 @@ struct TransportBar: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(vm.waveformZoom <= 1)
+                .help("Zoom out")
 
                 // Draggable zoom value
                 ZoomDragView(zoom: $vm.waveformZoom, offset: $vm.waveformOffset)
@@ -248,6 +252,7 @@ struct TransportBar: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(vm.waveformZoom >= 100)
+                .help("Zoom in")
 
                 Button(action: { vm.zoomReset() }) {
                     Text("Fit")
@@ -255,6 +260,7 @@ struct TransportBar: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
+                .help("Reset zoom to fit entire waveform")
             }
         }
         .padding(.horizontal, 10)

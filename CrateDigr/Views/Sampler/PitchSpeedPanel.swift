@@ -3,8 +3,7 @@ import SwiftUI
 struct PitchSpeedPanel: View {
     @EnvironmentObject var vm: SamplerViewModel
 
-    // Turntable pitch range options (like SL-1200 range selector)
-    @State private var turntableRange: Double = 8.0  // ±8%, ±16%, ±50%
+    // turntableRange now lives in vm.turntableRange (persists across tab switches)
 
     // Speed to percentage offset: speed 1.08 = +8%
     private func speedToPercent(_ speed: Double) -> Double {
@@ -52,6 +51,7 @@ struct PitchSpeedPanel: View {
                             .contentShape(RoundedRectangle(cornerRadius: 5))
                         }
                         .buttonStyle(.plain)
+                        .help(mode.description)
                     }
                 }
             }
@@ -75,13 +75,14 @@ struct PitchSpeedPanel: View {
                         Text("Range")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Picker("Range", selection: $turntableRange) {
+                        Picker("Range", selection: $vm.turntableRange) {
                             Text("±8%").tag(8.0)
                             Text("±16%").tag(16.0)
                             Text("±50%").tag(50.0)
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 180)
+                        .help("Pitch fader range — like the SL-1200 range switch")
                     }
 
                     HStack {
@@ -100,13 +101,14 @@ struct PitchSpeedPanel: View {
                     Slider(value: Binding(
                         get: { speedToPercent(vm.speed) },
                         set: { newPct in
-                            let clamped = max(-turntableRange, min(turntableRange, newPct))
+                            let clamped = max(-vm.turntableRange, min(vm.turntableRange, newPct))
                             vm.updateSpeed(percentToSpeed(clamped))
                         }
-                    ), in: -turntableRange...turntableRange, step: 0.1)
+                    ), in: -vm.turntableRange...vm.turntableRange, step: 0.1)
+                    .help("Pitch fader — changes speed and pitch together like vinyl")
 
                     HStack {
-                        Text("-\(String(format: "%.0f", turntableRange))%").font(.caption2).foregroundStyle(.secondary)
+                        Text("-\(String(format: "%.0f", vm.turntableRange))%").font(.caption2).foregroundStyle(.secondary)
                         Spacer()
                         Button("0%") {
                             vm.updateSpeed(1.0)
@@ -114,8 +116,9 @@ struct PitchSpeedPanel: View {
                         .font(.caption)
                         .buttonStyle(.plain)
                         .foregroundStyle(.blue)
+                        .help("Reset to original speed")
                         Spacer()
-                        Text("+\(String(format: "%.0f", turntableRange))%").font(.caption2).foregroundStyle(.secondary)
+                        Text("+\(String(format: "%.0f", vm.turntableRange))%").font(.caption2).foregroundStyle(.secondary)
                     }
 
                     if let bpm = vm.sampleFile?.bpm {
@@ -144,6 +147,7 @@ struct PitchSpeedPanel: View {
                     Slider(value: $vm.speed, in: 0.25...4.0, step: 0.01) { _ in
                         vm.updateSpeed(vm.speed)
                     }
+                    .help("Playback speed — independent of pitch")
                     HStack {
                         Text("25%").font(.caption2).foregroundStyle(.secondary)
                         Spacer()
@@ -151,6 +155,7 @@ struct PitchSpeedPanel: View {
                             .font(.caption)
                             .buttonStyle(.plain)
                             .foregroundStyle(.blue)
+                            .help("Reset speed to 100%")
                         Spacer()
                         Text("400%").font(.caption2).foregroundStyle(.secondary)
                     }
@@ -168,6 +173,7 @@ struct PitchSpeedPanel: View {
                     Slider(value: $vm.pitchSemitones, in: -24...24, step: 0.5) { _ in
                         vm.updatePitch(vm.pitchSemitones)
                     }
+                    .help("Pitch shift in semitones — independent of speed")
                     HStack {
                         Text("-24 st").font(.caption2).foregroundStyle(.secondary)
                         Spacer()
@@ -175,6 +181,7 @@ struct PitchSpeedPanel: View {
                             .font(.caption)
                             .buttonStyle(.plain)
                             .foregroundStyle(.blue)
+                            .help("Reset pitch to 0 semitones")
                         Spacer()
                         Text("+24 st").font(.caption2).foregroundStyle(.secondary)
                     }
@@ -228,6 +235,7 @@ struct PitchSpeedPanel: View {
                         .font(.caption)
                         .buttonStyle(.plain)
                         .foregroundStyle(.blue)
+                        .help("Reset all EQ bands to 0 dB")
                 }
 
                 // Horizontal layout like a real DJM-900 channel strip
@@ -239,6 +247,122 @@ struct PitchSpeedPanel: View {
                     Spacer()
                 }
                 .padding(.vertical, 4)
+            }
+
+            Divider()
+
+            // Mid/Side Processing
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Mid/Side")
+                        .font(.headline)
+                    Spacer()
+                    Button("Reset") { vm.resetMidSide() }
+                        .font(.caption)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.blue)
+                        .help("Reset Mid/Side to 0 dB")
+                }
+
+                Text("Mid = center (vocals, bass). Side = stereo width.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 24) {
+                    Spacer()
+                    EQKnob(label: "MID", value: vm.midGain, color: .cyan) { vm.midGain = $0 }
+                    EQKnob(label: "SIDE", value: vm.sideGain, color: .purple) { vm.sideGain = $0 }
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+
+                // Crossover frequency
+                HStack {
+                    Text("Crossover")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if vm.msCrossover > 0 {
+                        Text("\(Int(vm.msCrossover)) Hz")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Full Range")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Slider(
+                    value: Binding(
+                        get: {
+                            vm.msCrossover > 0 ? log2(Double(vm.msCrossover) / 20.0) / log2(1000.0) : 0
+                        },
+                        set: { newVal in
+                            if newVal <= 0.01 {
+                                vm.msCrossover = 0
+                            } else {
+                                vm.msCrossover = Float(20.0 * pow(1000.0, newVal))
+                            }
+                        }
+                    ),
+                    in: 0...1,
+                    step: 0.01
+                )
+                .help("M/S crossover — applies M/S only above this frequency. 0 = full range")
+                HStack {
+                    Text("Off").font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("20kHz").font(.caption2).foregroundStyle(.secondary)
+                }
+
+                if vm.midGain != 0 || vm.sideGain != 0 {
+                    Text("Applied on export only — no real-time preview")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Divider()
+
+            // Pan Control
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Pan")
+                        .font(.headline)
+                    Spacer()
+                    let panLabel: String = {
+                        if abs(vm.pan) < 0.01 { return "C" }
+                        else if vm.pan < 0 { return "\(Int(abs(vm.pan) * 100))L" }
+                        else { return "\(Int(vm.pan * 100))R" }
+                    }()
+                    Text(panLabel)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(abs(vm.pan) < 0.01 ? .secondary : .primary)
+                }
+
+                HStack(spacing: 6) {
+                    Text("L")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.blue)
+                    Slider(value: Binding(
+                        get: { Double(vm.pan) },
+                        set: { vm.updatePan(Float($0)) }
+                    ), in: -1...1, step: 0.01)
+                    .help("Stereo pan — L/R balance")
+                    Text("R")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.red)
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Center") { vm.updatePan(0) }
+                        .font(.caption)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.blue)
+                        .help("Reset pan to center")
+                    Spacer()
+                }
             }
         }
         .padding()
@@ -344,6 +468,7 @@ struct EQKnob: View {
                 if hovering { NSCursor.resizeUpDown.push() }
                 else { NSCursor.pop() }
             }
+            .help("\(label) EQ — drag up/down to adjust, double-click to reset")
 
             // dB readout
             Text("\(value >= 0 ? "+" : "")\(String(format: "%.0f", value))")

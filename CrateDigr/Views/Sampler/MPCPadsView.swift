@@ -30,6 +30,7 @@ struct MPCPadsView: View {
                     }
                 }
                 .toggleStyle(.checkbox)
+                .help("Stop other pads when a new one is triggered")
 
                 HStack(spacing: 4) {
                     Text("Length:")
@@ -42,6 +43,7 @@ struct MPCPadsView: View {
                     }
                     .pickerStyle(.menu)
                     .frame(width: 90)
+                    .help("How long each pad plays — Full slice or timed")
                 }
             }
 
@@ -79,6 +81,7 @@ struct MPCPadsView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .help("Clear all steps in the pattern sequencer")
                 }
 
                 // 16-step grid for first 4 pads (compact view)

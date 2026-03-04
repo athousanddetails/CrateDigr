@@ -66,19 +66,27 @@ final class SampleExporter {
         var eqLow: Float = 0    // dB gain for low shelf (200Hz)
         var eqMid: Float = 0    // dB gain for parametric mid (1kHz)
         var eqHigh: Float = 0   // dB gain for high shelf (5kHz)
+        var pan: Float = 0          // -1.0 (L) to +1.0 (R), 0 = center
+        var midGain: Float = 0     // dB, -26 to +6
+        var sideGain: Float = 0    // dB, -26 to +6
+        var msCrossover: Float = 0 // Hz, 0 = disabled (full range M/S)
         var lofi: LoFiOptions? = nil  // Optional lo-fi processing for export
 
         var hasEQ: Bool {
             eqLow != 0 || eqMid != 0 || eqHigh != 0
         }
 
+        var hasPan: Bool {
+            abs(pan) > 0.01
+        }
+
+        var hasMidSide: Bool {
+            midGain != 0 || sideGain != 0
+        }
+
         /// FFmpeg equalizer filter string matching the app's 3-band EQ
         var eqFilterString: String? {
             guard hasEQ else { return nil }
-            // ffmpeg superequalizer or use multiple equalizer filters
-            // Band 0: Low shelf at 200Hz
-            // Band 1: Parametric at 1kHz, width 1.5
-            // Band 2: High shelf at 5kHz
             var filters: [String] = []
             if eqLow != 0 {
                 filters.append("lowshelf=frequency=200:gain=\(String(format: "%.1f", eqLow))")
@@ -90,6 +98,44 @@ final class SampleExporter {
                 filters.append("highshelf=frequency=5000:gain=\(String(format: "%.1f", eqHigh))")
             }
             return filters.joined(separator: ",")
+        }
+
+        /// FFmpeg pan filter string for stereo balance
+        /// Uses equal-power panning: L_gain = cos(theta), R_gain = sin(theta)
+        var panFilterString: String? {
+            guard hasPan else { return nil }
+            let theta = Double(pan + 1) / 2.0 * .pi / 2.0
+            let leftGain = cos(theta)
+            let rightGain = sin(theta)
+            return "pan=stereo|c0=\(String(format: "%.4f", leftGain))*c0|c1=\(String(format: "%.4f", rightGain))*c1"
+        }
+
+        /// FFmpeg Mid/Side processing filter string
+        /// Uses stereotools for M/S level control
+        var midSideFilterString: String? {
+            guard hasMidSide else { return nil }
+            // Convert dB to linear
+            let midLinear = pow(10.0, Double(midGain) / 20.0)
+            let sideLinear = pow(10.0, Double(sideGain) / 20.0)
+
+            if msCrossover > 0 {
+                // With crossover: apply M/S only above the crossover frequency
+                // This requires a complex filter graph — handled separately
+                return nil
+            }
+
+            return "stereotools=mlev=\(String(format: "%.4f", midLinear)):slev=\(String(format: "%.4f", sideLinear))"
+        }
+
+        /// FFmpeg complex filter graph for M/S with crossover
+        /// Returns nil if no crossover or no M/S processing needed
+        var midSideComplexFilter: String? {
+            guard hasMidSide, msCrossover > 0 else { return nil }
+            let midLinear = pow(10.0, Double(midGain) / 20.0)
+            let sideLinear = pow(10.0, Double(sideGain) / 20.0)
+            let freq = Int(msCrossover)
+            // Split into low (untouched) and high (M/S processed), then remix
+            return "[0:a]asplit[low][high];[low]lowpass=f=\(freq)[lowout];[high]highpass=f=\(freq),stereotools=mlev=\(String(format: "%.4f", midLinear)):slev=\(String(format: "%.4f", sideLinear))[highout];[lowout][highout]amix=inputs=2:normalize=0"
         }
     }
 
@@ -133,17 +179,71 @@ final class SampleExporter {
         return outputPath
     }
 
-    /// Build combined ffmpeg audio filter string from EQ + normalize + any extra filters
+    /// Build combined ffmpeg audio filter string from EQ + M/S + Pan + normalize
+    /// Order: EQ → Mid/Side → Pan → Normalize
     private func buildFilterChain(baseFilters: [String] = [], options: ExportOptions) -> String? {
         var filters = baseFilters
+
+        // 1. EQ
         if let eqFilter = options.eqFilterString {
             filters.append(eqFilter)
         }
+
+        // 2. Mid/Side (simple, no crossover — crossover uses complex filter graph)
+        if let msFilter = options.midSideFilterString {
+            filters.append(msFilter)
+        }
+
+        // 3. Pan
+        if let panFilter = options.panFilterString {
+            filters.append(panFilter)
+        }
+
+        // 4. Normalize
         if options.normalize {
             // Peak normalization to -0.1dBTP
             filters.append("loudnorm=I=-14:TP=-0.1:LRA=11")
         }
+
         return filters.isEmpty ? nil : filters.joined(separator: ",")
+    }
+
+    /// Build a complete filter_complex string when M/S crossover is needed.
+    /// This incorporates EQ, M/S crossover, pan, and normalize into one graph.
+    /// Returns the ffmpeg args: ["-filter_complex", "...", "-map", "[out]"]
+    private func buildComplexFilterArgs(options: ExportOptions) -> [String]? {
+        guard options.hasMidSide, options.msCrossover > 0 else { return nil }
+
+        let midLinear = pow(10.0, Double(options.midGain) / 20.0)
+        let sideLinear = pow(10.0, Double(options.sideGain) / 20.0)
+        let freq = Int(options.msCrossover)
+
+        // Build the complex graph: split → lowpass (untouched) + highpass (M/S) → amix → post-filters
+        var graph = "[0:a]asplit[mslow][mshigh];"
+        graph += "[mslow]lowpass=f=\(freq)[mslowout];"
+        graph += "[mshigh]highpass=f=\(freq),stereotools=mlev=\(String(format: "%.4f", midLinear)):slev=\(String(format: "%.4f", sideLinear))[mshighout];"
+        graph += "[mslowout][mshighout]amix=inputs=2:normalize=0"
+
+        // Chain additional simple filters after amix
+        var postFilters: [String] = []
+        if let eqFilter = options.eqFilterString {
+            postFilters.append(eqFilter)
+        }
+        if let panFilter = options.panFilterString {
+            postFilters.append(panFilter)
+        }
+        if options.normalize {
+            postFilters.append("loudnorm=I=-14:TP=-0.1:LRA=11")
+        }
+
+        if !postFilters.isEmpty {
+            graph += "," + postFilters.joined(separator: ",")
+        }
+
+        // Tag the final output
+        graph += "[msout]"
+
+        return ["-filter_complex", graph, "-map", "[msout]"]
     }
 
     // MARK: - Export Region
@@ -222,7 +322,10 @@ final class SampleExporter {
 
             arguments += options.format.ffmpegArgs
 
-            if let filterChain = buildFilterChain(options: options) {
+            // Use complex filter graph for M/S with crossover, otherwise simple -af chain
+            if let complexArgs = buildComplexFilterArgs(options: options) {
+                arguments += complexArgs
+            } else if let filterChain = buildFilterChain(options: options) {
                 arguments += ["-af", filterChain]
             }
 
@@ -305,7 +408,10 @@ final class SampleExporter {
 
         arguments += options.format.ffmpegArgs
 
-        if let filterChain = buildFilterChain(options: options) {
+        // Use complex filter graph for M/S with crossover, otherwise simple -af chain
+        if let complexArgs = buildComplexFilterArgs(options: options) {
+            arguments += complexArgs
+        } else if let filterChain = buildFilterChain(options: options) {
             arguments += ["-af", filterChain]
         }
 
@@ -325,7 +431,23 @@ final class SampleExporter {
         }
     }
 
+    /// Build a combined post-processing filter string (EQ + M/S + Pan + Normalize)
+    /// for use inside pitch/speed export paths where filters are appended to the chain.
+    /// Note: M/S with crossover is NOT supported in this path — it's applied as a post-pass instead.
+    private func buildPostFilters(options: ExportOptions) -> String? {
+        var parts: [String] = []
+        if let eq = options.eqFilterString { parts.append(eq) }
+        if let ms = options.midSideFilterString { parts.append(ms) }
+        if let pan = options.panFilterString { parts.append(pan) }
+        if options.normalize {
+            parts.append("loudnorm=I=-14:TP=-0.1:LRA=11")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: ",")
+    }
+
     private func exportWithPitchSpeed(inputPath: URL, outputPath: URL, options: ExportOptions) async throws {
+        let postFilters = buildPostFilters(options: options)
+
         switch options.pitchSpeedMode {
         case .turntable:
             try await timeStretch.turntableExport(
@@ -333,7 +455,7 @@ final class SampleExporter {
                 outputPath: outputPath,
                 speedRatio: options.speedRatio,
                 sampleRate: options.format.sampleRate,
-                eqFilter: options.eqFilterString
+                eqFilter: postFilters
             )
         case .independent, .beats, .complex, .texture:
             try await timeStretch.independentExport(
@@ -342,10 +464,48 @@ final class SampleExporter {
                 speedRatio: options.speedRatio,
                 pitchSemitones: options.pitchSemitones,
                 sampleRate: options.format.sampleRate,
-                eqFilter: options.eqFilterString,
+                eqFilter: postFilters,
                 mode: options.pitchSpeedMode
             )
         }
+
+        // If M/S with crossover is active, apply it as a post-pass since the complex
+        // filter graph can't be combined with pitch/speed filters easily
+        if options.hasMidSide && options.msCrossover > 0 {
+            try await applyMidSideCrossoverPostPass(to: outputPath, options: options)
+        }
+    }
+
+    /// Apply M/S crossover processing as a separate post-pass on an already-exported file
+    private func applyMidSideCrossoverPostPass(to filePath: URL, options: ExportOptions) async throws {
+        guard let complexFilter = options.midSideComplexFilter else { return }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ytw_ms_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let tempPath = tempDir.appendingPathComponent("ms_temp.\(options.format.fileExtension)")
+
+        // Apply the complex M/S crossover filter
+        var arguments = [
+            "-i", filePath.path,
+            "-filter_complex", complexFilter + "[msout]",
+            "-map", "[msout]",
+            "-vn", "-y",
+            "-loglevel", "error"
+        ]
+        arguments += options.format.ffmpegArgs
+        arguments.append(tempPath.path)
+
+        let output = try await ProcessRunner.run(executableURL: ffmpegURL, arguments: arguments)
+        guard output.exitCode == 0 else {
+            throw ExportError.failed("M/S crossover: \(output.stderr)")
+        }
+
+        // Replace original with processed
+        try FileManager.default.removeItem(at: filePath)
+        try FileManager.default.moveItem(at: tempPath, to: filePath)
     }
 
     /// Apply Lo-Fi DSP effects to an already-exported audio file (in-place).

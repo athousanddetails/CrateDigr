@@ -23,6 +23,7 @@ struct BeatOverlayPanel: View {
                         .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
+                    .help("Filter loops by \(genre.rawValue)")
                 }
             }
 
@@ -103,6 +104,7 @@ struct BeatOverlayPanel: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .help("Load a custom drum loop from file")
             }
 
             Divider()
@@ -118,6 +120,7 @@ struct BeatOverlayPanel: View {
                         get: { Double(vm.beatOverlayVolume) },
                         set: { vm.updateBeatOverlayVolume(Float($0)) }
                     ), in: 0...1)
+                    .help("Beat overlay volume")
                     Text("\(Int(vm.beatOverlayVolume * 100))%")
                         .font(.caption)
                         .monospacedDigit()
@@ -155,6 +158,7 @@ struct BeatOverlayPanel: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(vm.selectedDrumLoop == nil)
+                .help(vm.beatOverlayEnabled ? "Stop beat overlay" : "Play drum loop synced to track BPM")
             }
         }
         .padding()

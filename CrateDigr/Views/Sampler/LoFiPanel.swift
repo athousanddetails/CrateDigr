@@ -23,6 +23,7 @@ struct LoFiPanel: View {
                 }
                 .toggleStyle(.switch)
                 .tint(.orange)
+                .help("Toggle real-time lo-fi preview on playback")
             }
 
             if vm.lofiEnabled {
@@ -42,6 +43,7 @@ struct LoFiPanel: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .help("Apply \(preset.name) lo-fi preset")
                     }
                 }
             }
@@ -60,6 +62,7 @@ struct LoFiPanel: View {
                         vm.lofiParameterChanged()
                     }
                 ), in: 4...16, step: 1)
+                .help("Reduce bit depth for crunchy digital distortion")
                 Text("\(vm.lofiBitDepth)-bit")
                     .font(.system(.caption, design: .monospaced))
                     .frame(width: 45, alignment: .trailing)
@@ -77,6 +80,7 @@ struct LoFiPanel: View {
                         vm.lofiParameterChanged()
                     }
                 ), in: 4000...44100, step: 1000)
+                .help("Lower sample rate for aliased, retro sound")
                 Text("\(Int(vm.lofiSampleRate))Hz")
                     .font(.system(.caption, design: .monospaced))
                     .frame(width: 60, alignment: .trailing)
@@ -94,6 +98,7 @@ struct LoFiPanel: View {
                         vm.lofiParameterChanged()
                     }
                 ), in: 0...1, step: 0.05)
+                .help("Tape-style saturation and warmth")
                 Text(String(format: "%.0f%%", vm.lofiDrive * 100))
                     .font(.system(.caption, design: .monospaced))
                     .frame(width: 45, alignment: .trailing)
@@ -111,6 +116,7 @@ struct LoFiPanel: View {
                         vm.lofiParameterChanged()
                     }
                 ), in: 0...1, step: 0.05)
+                .help("Add vinyl surface noise and crackle")
                 Text(String(format: "%.0f%%", vm.lofiCrackle * 100))
                     .font(.system(.caption, design: .monospaced))
                     .frame(width: 45, alignment: .trailing)
@@ -128,6 +134,7 @@ struct LoFiPanel: View {
                         vm.lofiParameterChanged()
                     }
                 ), in: 0...1, step: 0.05)
+                .help("Tape wow and flutter — pitch wobble effect")
                 Text(String(format: "%.0f%%", vm.lofiWowFlutter * 100))
                     .font(.system(.caption, design: .monospaced))
                     .frame(width: 45, alignment: .trailing)
@@ -151,6 +158,7 @@ struct LoFiPanel: View {
                         Label("Undo", systemImage: "arrow.uturn.backward")
                     }
                     .buttonStyle(.bordered)
+                    .help("Undo last bake-in and restore original audio")
                 }
             }
 

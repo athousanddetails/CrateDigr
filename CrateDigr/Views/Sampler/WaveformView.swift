@@ -28,6 +28,11 @@ struct WaveformView: View {
     // Store view width for auto-follow
     @State private var currentViewWidth: CGFloat = 0
 
+    // Loop bar drag-to-move state
+    @State private var isDraggingLoopBar = false
+    @State private var loopDragStartSample: Int = 0
+    @State private var loopDragLength: Int = 0
+
     private let loopBracketHeight: CGFloat = 18
     private let loopBracketHandleWidth: CGFloat = 12
 
@@ -247,16 +252,74 @@ struct WaveformView: View {
         if let region = vm.loopRegion, let sf = vm.sampleFile {
             let startX = sampleToX(region.startSample, totalSamples: sf.totalSamples, width: width)
             let endX = sampleToX(region.endSample, totalSamples: sf.totalSamples, width: width)
+            let clampedStartX = max(0, min(width, startX))
+            let clampedEndX = max(0, min(width, endX))
 
             ZStack(alignment: .leading) {
-                let clampedStartX = max(0, min(width, startX))
-                let clampedEndX = max(0, min(width, endX))
+                // Full-width invisible drag layer for moving the entire loop bar.
+                // Placed FIRST so handles (drawn later) take gesture priority in their area.
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 4)
+                            .onChanged { value in
+                                // Only move if drag started inside the green bar (between handles)
+                                let touchX = value.startLocation.x
+                                let insetStart = clampedStartX + loopBracketHandleWidth
+                                let insetEnd = clampedEndX - loopBracketHandleWidth
+                                guard insetEnd > insetStart, touchX >= insetStart, touchX <= insetEnd else { return }
+
+                                // Capture original loop position at drag start
+                                if !isDraggingLoopBar {
+                                    isDraggingLoopBar = true
+                                    guard let currentRegion = vm.loopRegion else { return }
+                                    loopDragStartSample = currentRegion.startSample
+                                    loopDragLength = currentRegion.length
+                                }
+
+                                // Convert drag delta from pixels to samples
+                                let currentSample = xToSample(value.location.x, width: width)
+                                let dragOriginSample = xToSample(value.startLocation.x, width: width)
+                                let deltaSamples = currentSample - dragOriginSample
+                                var newStart = loopDragStartSample + deltaSamples
+
+                                // Snap to grid if enabled
+                                if vm.loopSnapToGrid {
+                                    newStart = vm.snapSampleToGrid(newStart)
+                                }
+
+                                // Clamp to track bounds (preserve loop length)
+                                newStart = max(0, min(sf.totalSamples - loopDragLength, newStart))
+                                let newEnd = newStart + loopDragLength
+
+                                vm.loopRegion = LoopRegion(startSample: newStart, endSample: newEnd)
+                                vm.engine.updateLoopRegion(vm.loopRegion!)
+                            }
+                            .onEnded { _ in
+                                guard isDraggingLoopBar else { return }
+                                isDraggingLoopBar = false
+                                // Apply zero-crossing snapping to final position
+                                if let finalRegion = vm.loopRegion {
+                                    vm.setLoopRegion(start: finalRegion.startSample, end: finalRegion.endSample)
+                                }
+                                // Reschedule gapless loop playback with snapped region
+                                if vm.isPlaying && vm.loopEnabled, let finalRegion = vm.loopRegion {
+                                    vm.engine.playRegion(finalRegion, loop: true)
+                                }
+                            }
+                    )
+
+                // Visual green bar (no gesture, just visual)
                 if clampedEndX > clampedStartX {
                     Rectangle()
                         .fill(Color.green.opacity(0.3))
                         .frame(width: clampedEndX - clampedStartX, height: loopBracketHeight)
                         .offset(x: clampedStartX)
+                        .allowsHitTesting(false)
                 }
+
+                // S and E handles — drawn last so they sit on top and their gestures take priority
                 loopHandle(x: startX, isStart: true, width: width, sf: sf)
                 loopHandle(x: endX, isStart: false, width: width, sf: sf)
             }

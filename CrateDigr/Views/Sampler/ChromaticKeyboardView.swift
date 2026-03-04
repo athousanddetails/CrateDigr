@@ -34,6 +34,7 @@ struct ChromaticKeyboardView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .help("Octave down (Z)")
 
                     Text("Oct \(vm.keyboardOctave >= 0 ? "+" : "")\(vm.keyboardOctave)")
                         .font(.system(.caption, design: .monospaced))
@@ -45,6 +46,7 @@ struct ChromaticKeyboardView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .help("Octave up (X)")
                 }
 
                 Button(action: { vm.stopAllKeyboardNotes() }) {
@@ -54,6 +56,7 @@ struct ChromaticKeyboardView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .tint(.red)
+                .help("Stop all playing notes immediately")
             }
 
             if vm.sampleFile == nil {

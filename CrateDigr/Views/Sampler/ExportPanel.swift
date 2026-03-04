@@ -4,22 +4,26 @@ import UniformTypeIdentifiers
 struct ExportPanel: View {
     @EnvironmentObject var vm: SamplerViewModel
 
-    @State private var exportMode: ExportMode = .loop
-    @State private var sampleRate: Int = 48000
-    @State private var bitDepth: Int = 16
-    @State private var maxDuration: Double = 66
-    @State private var enforceMaxDuration = false
-    @State private var mono = false
-    @State private var zeroCrossing = true
-    @State private var normalize = false
-    @State private var includeLoFi = false
-    @State private var includeTempoEffects = true
-    enum ExportMode: String, CaseIterable, Identifiable {
-        case loop = "Loop Region"
-        case full = "Full File"
-        case slices = "Slices"
+    enum ExportMode: Int, CaseIterable, Identifiable {
+        case loop = 0
+        case full = 1
+        case slices = 2
 
-        var id: String { rawValue }
+        var id: Int { rawValue }
+        var label: String {
+            switch self {
+            case .loop: return "Loop Region"
+            case .full: return "Full File"
+            case .slices: return "Slices"
+            }
+        }
+    }
+
+    private var exportMode: Binding<ExportMode> {
+        Binding(
+            get: { ExportMode(rawValue: vm.exportMode) ?? .loop },
+            set: { vm.exportMode = $0.rawValue }
+        )
     }
 
     var body: some View {
@@ -28,15 +32,16 @@ struct ExportPanel: View {
                 .font(.headline)
 
             // Export mode
-            Picker("Mode", selection: $exportMode) {
+            Picker("Mode", selection: exportMode) {
                 ForEach(ExportMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
+                    Text(mode.label).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
+            .help("Export mode — Loop Region, Full File, or Slices")
 
             // Show loop bar range when loop mode is selected
-            if exportMode == .loop {
+            if exportMode.wrappedValue == .loop {
                 if let rangeStr = vm.loopBarRangeString {
                     HStack(spacing: 6) {
                         Image(systemName: "repeat")
@@ -81,6 +86,7 @@ struct ExportPanel: View {
                         }
                     }
                     .buttonStyle(.bordered)
+                    .help("Elektron Digitakt II — 48kHz, 16-bit, max 66s")
 
                     Button(action: applyMPCPreset) {
                         VStack(spacing: 2) {
@@ -92,6 +98,7 @@ struct ExportPanel: View {
                         }
                     }
                     .buttonStyle(.bordered)
+                    .help("Akai MPC — 44.1kHz, 16-bit")
 
                     Button(action: applySP404Preset) {
                         VStack(spacing: 2) {
@@ -103,6 +110,7 @@ struct ExportPanel: View {
                         }
                     }
                     .buttonStyle(.bordered)
+                    .help("Roland SP-404 — 44.1kHz, 16-bit, max 16s")
                 }
             }
 
@@ -111,34 +119,38 @@ struct ExportPanel: View {
                 Text("Sample Rate")
                     .fontWeight(.medium)
                 Spacer()
-                Picker("Sample Rate", selection: $sampleRate) {
+                Picker("Sample Rate", selection: $vm.exportSampleRate) {
                     Text("44.1 kHz").tag(44100)
                     Text("48 kHz").tag(48000)
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 180)
+                .help("Output sample rate")
             }
 
             HStack {
                 Text("Bit Depth")
                     .fontWeight(.medium)
                 Spacer()
-                Picker("Bit Depth", selection: $bitDepth) {
+                Picker("Bit Depth", selection: $vm.exportBitDepth) {
                     Text("16-bit").tag(16)
                     Text("24-bit").tag(24)
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 180)
+                .help("Output bit depth — 16-bit for hardware samplers, 24-bit for DAWs")
             }
 
             HStack {
-                Toggle("Mono", isOn: $mono)
+                Toggle("Mono", isOn: $vm.exportMono)
+                    .help("Mix down to mono")
                 Spacer()
-                Toggle("Zero Crossing", isOn: $zeroCrossing)
+                Toggle("Zero Crossing", isOn: $vm.exportZeroCrossing)
+                    .help("Snap export boundaries to zero-crossings to avoid clicks")
             }
 
             // Normalize option
-            Toggle(isOn: $normalize) {
+            Toggle(isOn: $vm.exportNormalize) {
                 HStack {
                     Text("Normalize")
                     Text("— peak level to 0dB")
@@ -146,12 +158,14 @@ struct ExportPanel: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .help("Normalize peak level to 0 dB for maximum loudness")
 
-            if exportMode == .slices {
+            if exportMode.wrappedValue == .slices {
                 HStack {
-                    Toggle("Max Duration", isOn: $enforceMaxDuration)
-                    if enforceMaxDuration {
-                        TextField("seconds", value: $maxDuration, format: .number)
+                    Toggle("Max Duration", isOn: $vm.exportEnforceMaxDuration)
+                        .help("Truncate slices longer than the specified duration")
+                    if vm.exportEnforceMaxDuration {
+                        TextField("seconds", value: $vm.exportMaxDuration, format: .number)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 60)
                         Text("s")
@@ -166,9 +180,9 @@ struct ExportPanel: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Include Effects")
                     .fontWeight(.medium)
-                Toggle(isOn: $includeTempoEffects) {
+                Toggle(isOn: $vm.exportIncludeTempoEffects) {
                     HStack {
-                        Text("Pitch / Speed")
+                        Text("Pitch / Speed / EQ")
                         if vm.speed != 1.0 || vm.pitchSemitones != 0 {
                             Text("(\(pitchSpeedSummary))")
                                 .font(.caption)
@@ -176,7 +190,8 @@ struct ExportPanel: View {
                         }
                     }
                 }
-                Toggle(isOn: $includeLoFi) {
+                .help("Include pitch/speed/EQ/pan/M-S changes in the exported file")
+                Toggle(isOn: $vm.exportIncludeLoFi) {
                     HStack {
                         Text("Lo-Fi FX")
                         if vm.lofiEnabled {
@@ -186,6 +201,7 @@ struct ExportPanel: View {
                         }
                     }
                 }
+                .help("Include lo-fi effects in the exported file")
             }
 
             Divider()
@@ -198,8 +214,9 @@ struct ExportPanel: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(vm.sampleFile == nil || vm.isExporting)
-                .disabled(exportMode == .slices && vm.sliceMarkers.isEmpty)
-                .disabled(exportMode == .loop && vm.loopRegion == nil)
+                .disabled(exportMode.wrappedValue == .slices && vm.sliceMarkers.isEmpty)
+                .disabled(exportMode.wrappedValue == .loop && vm.loopRegion == nil)
+                .help("Export audio to WAV file")
 
                 if vm.isExporting {
                     ProgressView(value: vm.exportProgress)
@@ -211,7 +228,7 @@ struct ExportPanel: View {
             }
 
             // Status
-            if exportMode == .slices {
+            if exportMode.wrappedValue == .slices {
                 Text("\(vm.sliceMarkers.count) slices to export")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -234,6 +251,7 @@ struct ExportPanel: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
                 .disabled(vm.sampleFile == nil || vm.isExporting)
+                .help("Render playback with all effects baked into a new WAV")
 
                 if vm.loopEnabled && vm.loopRegion != nil {
                     Text("Will resample loop region only")
@@ -246,51 +264,55 @@ struct ExportPanel: View {
     }
 
     private func applyDigitaktPreset() {
-        sampleRate = 48000
-        bitDepth = 16
-        mono = false
-        enforceMaxDuration = true
-        maxDuration = 66
-        zeroCrossing = true
-        normalize = true
+        vm.exportSampleRate = 48000
+        vm.exportBitDepth = 16
+        vm.exportMono = false
+        vm.exportEnforceMaxDuration = true
+        vm.exportMaxDuration = 66
+        vm.exportZeroCrossing = true
+        vm.exportNormalize = true
     }
 
     private func applyMPCPreset() {
-        sampleRate = 44100
-        bitDepth = 16
-        mono = false
-        enforceMaxDuration = false
-        zeroCrossing = true
-        normalize = true
+        vm.exportSampleRate = 44100
+        vm.exportBitDepth = 16
+        vm.exportMono = false
+        vm.exportEnforceMaxDuration = false
+        vm.exportZeroCrossing = true
+        vm.exportNormalize = true
     }
 
     private func applySP404Preset() {
-        sampleRate = 44100
-        bitDepth = 16
-        mono = false
-        enforceMaxDuration = true
-        maxDuration = 16
-        zeroCrossing = true
-        normalize = true
+        vm.exportSampleRate = 44100
+        vm.exportBitDepth = 16
+        vm.exportMono = false
+        vm.exportEnforceMaxDuration = true
+        vm.exportMaxDuration = 16
+        vm.exportZeroCrossing = true
+        vm.exportNormalize = true
     }
 
     private func buildOptions() -> SampleExporter.ExportOptions {
         var options = SampleExporter.ExportOptions()
-        options.format = .wav(sampleRate: sampleRate, bitDepth: bitDepth)
-        options.zeroCrossing = zeroCrossing
-        options.mono = mono
-        options.normalize = normalize
+        options.format = .wav(sampleRate: vm.exportSampleRate, bitDepth: vm.exportBitDepth)
+        options.zeroCrossing = vm.exportZeroCrossing
+        options.mono = vm.exportMono
+        options.normalize = vm.exportNormalize
 
-        if includeTempoEffects {
+        if vm.exportIncludeTempoEffects {
             options.speedRatio = vm.speed
             options.pitchSemitones = vm.pitchSemitones
             options.pitchSpeedMode = vm.pitchSpeedMode
             options.eqLow = vm.eqLow
             options.eqMid = vm.eqMid
             options.eqHigh = vm.eqHigh
+            options.pan = vm.pan
+            options.midGain = vm.midGain
+            options.sideGain = vm.sideGain
+            options.msCrossover = vm.msCrossover
         }
 
-        if includeLoFi && vm.lofiEnabled {
+        if vm.exportIncludeLoFi && vm.lofiEnabled {
             options.lofi = SampleExporter.LoFiOptions(
                 bitDepth: vm.lofiBitDepth,
                 targetSampleRate: vm.lofiSampleRate,
@@ -300,8 +322,8 @@ struct ExportPanel: View {
             )
         }
 
-        if enforceMaxDuration {
-            options.maxDuration = maxDuration
+        if vm.exportEnforceMaxDuration {
+            options.maxDuration = vm.exportMaxDuration
         }
 
         return options
@@ -329,7 +351,7 @@ struct ExportPanel: View {
         guard let sf = vm.sampleFile else { return "export" }
         let bpmTag = effectiveBPMTag()
 
-        switch exportMode {
+        switch exportMode.wrappedValue {
         case .full:
             return "\(sf.filename)_\(bpmTag)"
         case .loop:
@@ -357,7 +379,7 @@ struct ExportPanel: View {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        switch exportMode {
+        switch exportMode.wrappedValue {
         case .full:
             vm.exportFull(options: options, outputURL: url)
         case .loop:

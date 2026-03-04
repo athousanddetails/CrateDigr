@@ -12,6 +12,7 @@ struct FileBrowserSidebar: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .help("Choose a folder with audio files")
 
                 Spacer()
 

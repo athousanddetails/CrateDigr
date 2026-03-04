@@ -44,6 +44,7 @@ struct SamplerTabView: View {
                                 .contentShape(RoundedRectangle(cornerRadius: 6))
                             }
                             .buttonStyle(.plain)
+                            .help(panelTooltip(panel))
                         }
                     }
                     .padding(.horizontal, 6)
@@ -105,5 +106,17 @@ struct SamplerTabView: View {
             }
         }
         .navigationTitle("Sampler")
+    }
+
+    private func panelTooltip(_ panel: SamplerToolPanel) -> String {
+        switch panel {
+        case .pitchSpeed: return "Warp mode, speed, pitch, EQ controls"
+        case .beat: return "Drum loop overlay synced to BPM"
+        case .chop: return "Slice audio by transients, grid, or manually"
+        case .pads: return "MPC-style pads for triggering slices"
+        case .keyboard: return "Chromatic keyboard for pitched playback"
+        case .lofi: return "Lo-fi effects — bit crush, vinyl, tape"
+        case .export: return "Export audio as WAV with format options"
+        }
     }
 }

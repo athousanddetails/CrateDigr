@@ -118,6 +118,28 @@ final class SamplerViewModel: ObservableObject {
     @Published var eqLow: Float = 0    // dB, -26 to +6
     @Published var eqMid: Float = 0
     @Published var eqHigh: Float = 0
+
+    // MARK: - Pan & Mid/Side
+    @Published var pan: Float = 0          // -1.0 (L) to +1.0 (R), 0 = center
+    @Published var midGain: Float = 0      // dB, -26 to +6
+    @Published var sideGain: Float = 0     // dB, -26 to +6
+    @Published var msCrossover: Float = 0  // Hz, 0 = disabled (full range M/S)
+
+    // MARK: - Export Settings (persisted across tab switches)
+    @Published var exportMode: Int = 0              // 0=loop, 1=full, 2=slices
+    @Published var exportSampleRate: Int = 48000
+    @Published var exportBitDepth: Int = 16
+    @Published var exportMaxDuration: Double = 66
+    @Published var exportEnforceMaxDuration = false
+    @Published var exportMono = false
+    @Published var exportZeroCrossing = true
+    @Published var exportNormalize = false
+    @Published var exportIncludeLoFi = false
+    @Published var exportIncludeTempoEffects = true
+
+    // MARK: - Pitch/Speed UI Settings
+    @Published var turntableRange: Double = 8.0     // ±8%, ±16%, ±50%
+
     private var tapTimes: [Date] = []
     private var metronomeTimer: Timer?
 
@@ -413,6 +435,17 @@ final class SamplerViewModel: ObservableObject {
         eqMid = 0
         eqHigh = 0
         engine.resetEQ()
+    }
+
+    func updatePan(_ value: Float) {
+        pan = max(-1, min(1, value))
+        engine.setPan(pan)
+    }
+
+    func resetMidSide() {
+        midGain = 0
+        sideGain = 0
+        msCrossover = 0
     }
 
     // MARK: - Beat Overlay

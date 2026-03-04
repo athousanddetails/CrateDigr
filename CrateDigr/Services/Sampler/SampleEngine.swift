@@ -559,6 +559,11 @@ final class SampleEngine: ObservableObject {
         }
     }
 
+    /// Set stereo pan position (-1.0 = full left, 0 = center, +1.0 = full right)
+    func setPan(_ value: Float) {
+        playerNode.pan = max(-1, min(1, value))
+    }
+
     // MARK: - Metronome
 
     func setupMetronome(sampleRate: Double) {
