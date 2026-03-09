@@ -126,14 +126,8 @@ struct TransportBar: View {
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
 
-                    Button(action: { vm.nudgeGridLeft() }) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 12, weight: .bold))
-                            .frame(width: 24, height: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Nudge grid left")
+                    RepeatButton(systemImage: "chevron.left", action: { vm.nudgeGridLeft() })
+                        .help("Nudge grid left — hold to scroll")
 
                     // Show current offset in ms
                     if let sf = vm.sampleFile {
@@ -144,14 +138,8 @@ struct TransportBar: View {
                             .frame(width: 36, alignment: .center)
                     }
 
-                    Button(action: { vm.nudgeGridRight() }) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .bold))
-                            .frame(width: 24, height: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Nudge grid right")
+                    RepeatButton(systemImage: "chevron.right", action: { vm.nudgeGridRight() })
+                        .help("Nudge grid right — hold to scroll")
 
                     Button(action: { vm.resetGrid() }) {
                         Text("R")
@@ -226,13 +214,22 @@ struct TransportBar: View {
             Divider().frame(height: 20)
 
             // Waveform / Spectrogram toggle
-            Button(action: { vm.showSpectrogram.toggle() }) {
+            Button(action: { vm.showSpectrogram.toggle(); vm.showStereoWaveform = false }) {
                 Image(systemName: vm.showSpectrogram ? "chart.bar.xaxis" : "waveform")
                     .font(.system(size: 12))
                     .foregroundStyle(vm.showSpectrogram ? .cyan : .secondary)
             }
             .buttonStyle(.plain)
             .help(vm.showSpectrogram ? "Show Waveform" : "Show Spectrogram")
+
+            // Stereo L/R waveform toggle
+            Button(action: { vm.showStereoWaveform.toggle(); vm.showSpectrogram = false }) {
+                Image(systemName: "rectangle.split.1x2")
+                    .font(.system(size: 12))
+                    .foregroundStyle(vm.showStereoWaveform ? .blue : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(vm.showStereoWaveform ? "Show mono waveform" : "Show stereo L/R waveform")
 
             // Zoom controls
             HStack(spacing: 4) {
@@ -416,5 +413,50 @@ struct ZoomDragView: View {
                     }
             )
             .help("Drag up/down to zoom")
+    }
+}
+
+// MARK: - Hold-to-Repeat Button
+
+/// A button that fires once on tap and continuously while held down.
+struct RepeatButton: View {
+    let systemImage: String
+    let action: () -> Void
+
+    @State private var timer: Timer?
+    @State private var isHolding = false
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 12, weight: .bold))
+            .frame(width: 24, height: 20)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(isHolding ? Color.gray.opacity(0.3) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.gray.opacity(0.4), lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !isHolding else { return }
+                        isHolding = true
+                        action()  // Fire immediately on press
+                        let t = Timer(timeInterval: 0.05, repeats: true) { _ in
+                            Task { @MainActor in action() }
+                        }
+                        // Must add to .common mode — during drag, RunLoop is in .tracking mode
+                        RunLoop.current.add(t, forMode: .common)
+                        timer = t
+                    }
+                    .onEnded { _ in
+                        isHolding = false
+                        timer?.invalidate()
+                        timer = nil
+                    }
+            )
     }
 }

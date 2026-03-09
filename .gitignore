@@ -1,6 +1,7 @@
 # === Build artifacts ===
 .build/
 *.app
+*.zip
 DerivedData/
 
 # === Bundled binaries (too large for git, download via setup script) ===

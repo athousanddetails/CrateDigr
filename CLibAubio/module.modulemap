@@ -1,0 +1,5 @@
+module CLibAubio {
+    header "include/aubio_tempo_wrapper.h"
+    link "aubio"
+    export *
+}

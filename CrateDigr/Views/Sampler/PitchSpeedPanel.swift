@@ -5,6 +5,13 @@ struct PitchSpeedPanel: View {
 
     // turntableRange now lives in vm.turntableRange (persists across tab switches)
 
+    // Crossover knob: logarithmic Hz → normalized 0..1
+    private var crossoverKnobValue: Float {
+        vm.msCrossover > 0
+            ? Float(log2(Double(vm.msCrossover) / 20.0) / log2(1000.0))
+            : 0
+    }
+
     // Speed to percentage offset: speed 1.08 = +8%
     private func speedToPercent(_ speed: Double) -> Double {
         (speed - 1.0) * 100.0
@@ -225,143 +232,93 @@ struct PitchSpeedPanel: View {
 
             Divider()
 
-            // 3-Band EQ — Pioneer DJM-900 style potentiometers
+            // EQ / Mid·Side / Pan — consolidated knob strip
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("3-Band EQ")
+                    Text("EQ / M·S / Pan")
                         .font(.headline)
                     Spacer()
-                    Button("Flat") { vm.resetEQ() }
+                    Button("Reset All") { vm.resetAllEQPanMS() }
                         .font(.caption)
                         .buttonStyle(.plain)
                         .foregroundStyle(.blue)
-                        .help("Reset all EQ bands to 0 dB")
-                }
-
-                // Horizontal layout like a real DJM-900 channel strip
-                HStack(spacing: 24) {
-                    Spacer()
-                    EQKnob(label: "LOW", value: vm.eqLow, color: .blue) { vm.updateEQLow($0) }
-                    EQKnob(label: "MID", value: vm.eqMid, color: .orange) { vm.updateEQMid($0) }
-                    EQKnob(label: "HI", value: vm.eqHigh, color: .white) { vm.updateEQHigh($0) }
-                    Spacer()
-                }
-                .padding(.vertical, 4)
-            }
-
-            Divider()
-
-            // Mid/Side Processing
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Mid/Side")
-                        .font(.headline)
-                    Spacer()
-                    Button("Reset") { vm.resetMidSide() }
-                        .font(.caption)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.blue)
-                        .help("Reset Mid/Side to 0 dB")
-                }
-
-                Text("Mid = center (vocals, bass). Side = stereo width.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 24) {
-                    Spacer()
-                    EQKnob(label: "MID", value: vm.midGain, color: .cyan) { vm.midGain = $0 }
-                    EQKnob(label: "SIDE", value: vm.sideGain, color: .purple) { vm.sideGain = $0 }
-                    Spacer()
-                }
-                .padding(.vertical, 4)
-
-                // Crossover frequency
-                HStack {
-                    Text("Crossover")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if vm.msCrossover > 0 {
-                        Text("\(Int(vm.msCrossover)) Hz")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Full Range")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Slider(
-                    value: Binding(
-                        get: {
-                            vm.msCrossover > 0 ? log2(Double(vm.msCrossover) / 20.0) / log2(1000.0) : 0
-                        },
-                        set: { newVal in
-                            if newVal <= 0.01 {
-                                vm.msCrossover = 0
-                            } else {
-                                vm.msCrossover = Float(20.0 * pow(1000.0, newVal))
-                            }
-                        }
-                    ),
-                    in: 0...1,
-                    step: 0.01
-                )
-                .help("M/S crossover — applies M/S only above this frequency. 0 = full range")
-                HStack {
-                    Text("Off").font(.caption2).foregroundStyle(.secondary)
-                    Spacer()
-                    Text("20kHz").font(.caption2).foregroundStyle(.secondary)
-                }
-
-                if vm.midGain != 0 || vm.sideGain != 0 {
-                    Text("Applied on export only — no real-time preview")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
-            }
-
-            Divider()
-
-            // Pan Control
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Pan")
-                        .font(.headline)
-                    Spacer()
-                    let panLabel: String = {
-                        if abs(vm.pan) < 0.01 { return "C" }
-                        else if vm.pan < 0 { return "\(Int(abs(vm.pan) * 100))L" }
-                        else { return "\(Int(vm.pan * 100))R" }
-                    }()
-                    Text(panLabel)
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(abs(vm.pan) < 0.01 ? .secondary : .primary)
+                        .help("Reset EQ, Mid/Side, and Pan to defaults")
                 }
 
                 HStack(spacing: 6) {
-                    Text("L")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.blue)
-                    Slider(value: Binding(
-                        get: { Double(vm.pan) },
-                        set: { vm.updatePan(Float($0)) }
-                    ), in: -1...1, step: 0.01)
-                    .help("Stereo pan — L/R balance")
-                    Text("R")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.red)
-                }
+                    // ── EQ ──
+                    VStack(spacing: 4) {
+                        Text("EQ")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            EQKnob(label: "LOW", value: vm.eqLow, color: .blue, onChange: { vm.updateEQLow($0) })
+                            EQKnob(label: "MID", value: vm.eqMid, color: .orange, onChange: { vm.updateEQMid($0) })
+                            EQKnob(label: "HI", value: vm.eqHigh, color: .white, onChange: { vm.updateEQHigh($0) })
+                        }
+                    }
 
-                HStack {
-                    Spacer()
-                    Button("Center") { vm.updatePan(0) }
-                        .font(.caption)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.blue)
-                        .help("Reset pan to center")
-                    Spacer()
+                    Divider().frame(height: 56).padding(.horizontal, 4)
+
+                    // ── Mid / Side ──
+                    VStack(spacing: 4) {
+                        Text("M / S")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            EQKnob(label: "M", value: vm.midGain, color: .cyan, onChange: { vm.updateMidGain($0) })
+                            EQKnob(label: "S", value: vm.sideGain, color: .purple, onChange: { vm.updateSideGain($0) })
+                            EQKnob(
+                                label: "XOVR",
+                                value: crossoverKnobValue,
+                                color: .teal,
+                                minValue: 0,
+                                maxValue: 1,
+                                sensitivity: 0.004,
+                                formatValue: { _ in
+                                    vm.msCrossover > 0 ? "\(Int(vm.msCrossover))" : "Off"
+                                },
+                                onChange: { newVal in
+                                    if newVal <= 0.01 {
+                                        vm.updateMsCrossover(0)
+                                    } else {
+                                        vm.updateMsCrossover(Float(20.0 * pow(1000.0, Double(max(0, min(1, newVal))))))
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    Divider().frame(height: 56).padding(.horizontal, 4)
+
+                    // ── Pan ──
+                    VStack(spacing: 4) {
+                        Text("PAN")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.secondary)
+                        EQKnob(
+                            label: "PAN",
+                            value: vm.pan,
+                            color: .green,
+                            minValue: -1,
+                            maxValue: 1,
+                            sensitivity: 0.01,
+                            formatValue: { v in
+                                if abs(v) < 0.02 { return "C" }
+                                else if v < 0 { return "\(Int(abs(v) * 100))L" }
+                                else { return "\(Int(v * 100))R" }
+                            },
+                            onChange: { vm.updatePan($0) }
+                        )
+                    }
+                }
+                .padding(.vertical, 4)
+
+                if (vm.midGain != 0 || vm.sideGain != 0),
+                   let sf = vm.sampleFile, sf.channelCount == 1 {
+                    Text("M/S has no effect — source file is mono")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -375,73 +332,107 @@ struct EQKnob: View {
     let label: String
     let value: Float
     let color: Color
+    var minValue: Float = -96
+    var maxValue: Float = 12
+    var sensitivity: Float = 0.5
+    var formatValue: ((Float) -> String)? = nil
     let onChange: (Float) -> Void
 
-    private let knobSize: CGFloat = 48
-    private let minValue: Float = -26
-    private let maxValue: Float = 6
-    // Rotation range: 270 degrees (-135 to +135 from top)
+    private let knobSize: CGFloat = 44
+    // Rotation range: 270 degrees (-135 to +135 from top, 0° = noon)
     private let startAngle: Double = -135
     private let endAngle: Double = 135
 
     @State private var isDragging = false
     @State private var dragStartValue: Float = 0
 
-    private var normalizedValue: Double {
-        Double((value - minValue) / (maxValue - minValue))
+    /// For bipolar knobs, 0 is ALWAYS at noon (0°). Left half = negative, right half = positive.
+    /// For unipolar knobs, linear mapping from min to max across the full arc.
+    private var isBipolar: Bool {
+        minValue < 0 && maxValue > 0
     }
 
     private var rotationDegrees: Double {
-        startAngle + normalizedValue * (endAngle - startAngle)
+        if isBipolar {
+            // Bipolar: 0 at noon (0°), negative goes left, positive goes right
+            if value >= 0 {
+                // Map [0, maxValue] → [0°, endAngle]
+                let frac = maxValue > 0 ? Double(value / maxValue) : 0
+                return frac * endAngle
+            } else {
+                // Map [minValue, 0] → [startAngle, 0°]
+                let frac = minValue < 0 ? Double(value / minValue) : 0
+                return frac * startAngle
+            }
+        } else {
+            guard maxValue > minValue else { return startAngle }
+            let norm = Double((value - minValue) / (maxValue - minValue))
+            return startAngle + norm * (endAngle - startAngle)
+        }
+    }
+
+    /// Zero is always at noon (0°) for bipolar knobs
+    private var zeroDegrees: Double { 0 }
+
+    private var displayText: String {
+        if let fmt = formatValue { return fmt(value) }
+        if value <= minValue + 6 && minValue <= -90 { return "KILL" }
+        return "\(value >= 0 ? "+" : "")\(String(format: "%.0f", value))"
+    }
+
+    private var arcColor: Color {
+        if minValue <= -90 && value <= -90 { return .red }
+        return color
     }
 
     var body: some View {
-        VStack(spacing: 4) {
-            Text(label)
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundStyle(color)
-
+        VStack(spacing: 3) {
             // Knob
             ZStack {
-                // Outer ring / track
+                // Track ring (full 270° background)
                 Circle()
-                    .stroke(Color.gray.opacity(0.3), lineWidth: 3)
+                    .stroke(Color.gray.opacity(0.2), lineWidth: 2.5)
                     .frame(width: knobSize, height: knobSize)
 
-                // Value arc — shows how far the knob is turned
-                ArcShape(startAngle: startAngle, endAngle: rotationDegrees)
-                    .stroke(
-                        value > 0 ? color : (value < -20 ? Color.red : color.opacity(0.6)),
-                        style: StrokeStyle(lineWidth: 3, lineCap: .round)
-                    )
-                    .frame(width: knobSize, height: knobSize)
+                // Value arc: bipolar draws from center (0), unipolar from min
+                if isBipolar {
+                    // Center-zero: arc from noon outward (left for -, right for +)
+                    let fromDeg = value >= 0 ? zeroDegrees : rotationDegrees
+                    let toDeg = value >= 0 ? rotationDegrees : zeroDegrees
+                    ArcShape(startAngle: fromDeg, endAngle: toDeg)
+                        .stroke(arcColor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .frame(width: knobSize, height: knobSize)
+                } else {
+                    ArcShape(startAngle: startAngle, endAngle: rotationDegrees)
+                        .stroke(arcColor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .frame(width: knobSize, height: knobSize)
+                }
 
                 // Knob body
                 Circle()
                     .fill(
-                        RadialGradient(
-                            colors: [Color(white: 0.35), Color(white: 0.15)],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: knobSize / 2 - 4
+                        LinearGradient(
+                            colors: [Color(white: 0.30), Color(white: 0.14)],
+                            startPoint: .top,
+                            endPoint: .bottom
                         )
                     )
                     .frame(width: knobSize - 8, height: knobSize - 8)
-                    .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
+                    .shadow(color: .black.opacity(0.4), radius: 1.5, y: 1)
 
-                // Indicator line
+                // Pointer line
                 Rectangle()
-                    .fill(isDragging ? color : Color.white)
-                    .frame(width: 2, height: knobSize / 2 - 8)
+                    .fill(isDragging ? color : Color.white.opacity(0.9))
+                    .frame(width: 1.5, height: knobSize / 2 - 8)
                     .offset(y: -(knobSize / 4 - 4))
                     .rotationEffect(.degrees(rotationDegrees))
 
                 // Center dot
                 Circle()
-                    .fill(Color(white: 0.25))
-                    .frame(width: 6, height: 6)
+                    .fill(Color(white: 0.22))
+                    .frame(width: 5, height: 5)
             }
-            .frame(width: knobSize + 4, height: knobSize + 4)
+            .frame(width: knobSize + 2, height: knobSize + 2)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 1)
@@ -450,30 +441,57 @@ struct EQKnob: View {
                             isDragging = true
                             dragStartValue = value
                         }
-                        // Drag up = increase, drag down = decrease
-                        let deltaY = -drag.translation.height
-                        let sensitivity: Float = 0.25 // dB per point
-                        let newValue = dragStartValue + Float(deltaY) * sensitivity
-                        let clamped = max(minValue, min(maxValue, newValue))
-                        onChange(clamped)
+                        let deltaY = Float(-drag.translation.height)
+
+                        if isBipolar {
+                            // Drag in normalized angular space [-1, 1] where 0 = noon.
+                            // Same physical drag distance for full range on both sides.
+                            // Negative side feel is preserved; positive becomes proportionally slower.
+                            let absMin = abs(minValue)
+
+                            // Convert start value to normalized position
+                            let startNorm: Float = dragStartValue >= 0
+                                ? (maxValue > 0 ? dragStartValue / maxValue : 0)
+                                : (absMin > 0 ? dragStartValue / absMin : 0)
+
+                            // Sensitivity scaled to normalized space (based on negative range)
+                            let normSens = absMin > 0 ? sensitivity / absMin : sensitivity
+                            let newNorm = max(-1, min(1, startNorm + deltaY * normSens))
+
+                            // Convert back to value
+                            let newValue = newNorm >= 0
+                                ? newNorm * maxValue
+                                : newNorm * absMin
+                            onChange(max(minValue, min(maxValue, newValue)))
+                        } else {
+                            let newValue = dragStartValue + deltaY * sensitivity
+                            onChange(max(minValue, min(maxValue, newValue)))
+                        }
                     }
                     .onEnded { _ in
                         isDragging = false
                     }
             )
             .onTapGesture(count: 2) {
-                onChange(0) // Double-click resets to 0 dB
+                let resetValue: Float = (minValue < -10) ? 0 : (minValue + maxValue) / 2
+                onChange(resetValue)
             }
             .onHover { hovering in
                 if hovering { NSCursor.resizeUpDown.push() }
                 else { NSCursor.pop() }
             }
-            .help("\(label) EQ — drag up/down to adjust, double-click to reset")
+            .help("\(label) — drag up/down, double-click to reset")
 
-            // dB readout
-            Text("\(value >= 0 ? "+" : "")\(String(format: "%.0f", value))")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundColor(abs(value) < 0.1 ? .gray : (value < -20 ? .red : .white))
+            // Label + value
+            Text(label)
+                .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                .foregroundStyle(color)
+            Text(displayText)
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundColor(
+                    minValue <= -90 && value <= -90 ? .red :
+                    (abs(value) < 0.1 ? .gray : .white)
+                )
         }
     }
 }

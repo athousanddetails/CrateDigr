@@ -16,6 +16,8 @@ final class SampleEngine: ObservableObject {
     private var timePitchNode = AVAudioUnitTimePitch()
     private var varispeedNode = AVAudioUnitVarispeed()  // True vinyl repitch
     private var eqNode = AVAudioUnitEQ(numberOfBands: 3)
+    private var midSideUnit: AVAudioUnit?
+    private var midSideAU: MidSideAU?
     private var audioBuffer: AVAudioPCMBuffer?
     private var audioFormat: AVAudioFormat?
 
@@ -65,6 +67,7 @@ final class SampleEngine: ObservableObject {
         engine.attach(varispeedNode)
         engine.attach(eqNode)
         setupEQBands()
+        setupMidSideNode()
 
         // Create pad players
         for _ in 0..<padCount {
@@ -144,54 +147,67 @@ final class SampleEngine: ObservableObject {
     func loadSample(_ sampleFile: SampleFile) {
         stop()
 
-        let format = AVAudioFormat(
+        let sampleRate = sampleFile.sampleRate
+        let totalSamples = sampleFile.totalSamples
+
+        // Always use stereo format for main chain (enables real-time M/S)
+        let stereoFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleFile.sampleRate,
-            channels: 1,
+            sampleRate: sampleRate,
+            channels: 2,
             interleaved: false
         )!
 
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(sampleFile.totalSamples)) else { return }
-
-        buffer.frameLength = AVAudioFrameCount(sampleFile.totalSamples)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: stereoFormat, frameCapacity: AVAudioFrameCount(totalSamples)) else { return }
+        buffer.frameLength = AVAudioFrameCount(totalSamples)
 
         if let channelData = buffer.floatChannelData {
-            sampleFile.samples.withUnsafeBufferPointer { src in
-                channelData[0].update(from: src.baseAddress!, count: sampleFile.totalSamples)
+            sampleFile.leftSamples.withUnsafeBufferPointer { src in
+                channelData[0].update(from: src.baseAddress!, count: totalSamples)
+            }
+            sampleFile.rightSamples.withUnsafeBufferPointer { src in
+                channelData[1].update(from: src.baseAddress!, count: totalSamples)
             }
         }
 
         self.audioBuffer = buffer
-        self.audioFormat = format
+        self.audioFormat = stereoFormat
 
-        // Connect nodes based on current mode
-        reconnectMainChain(format: format)
+        // Connect main chain (stereo: player → pitch/speed → EQ → M/S → mixer)
+        reconnectMainChain(format: stereoFormat)
 
-        // Connect pad players
+        // Mono format for auxiliary paths (pads, metronome use their own mono buffers)
+        let monoFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+
+        // Connect pad players (mono — they create their own mono buffers)
         for padPlayer in padPlayers {
             engine.disconnectNodeOutput(padPlayer)
-            engine.connect(padPlayer, to: engine.mainMixerNode, format: format)
+            engine.connect(padPlayer, to: engine.mainMixerNode, format: monoFormat)
         }
 
-        // Connect scrub player
+        // Connect scrub player (stereo — plays from main buffer)
         engine.disconnectNodeOutput(scrubPlayer)
-        engine.connect(scrubPlayer, to: engine.mainMixerNode, format: format)
+        engine.connect(scrubPlayer, to: engine.mainMixerNode, format: stereoFormat)
 
-        // Connect chromatic key players: player → timePitch → mixer
+        // Connect chromatic key players (stereo — play from main buffer)
         for kp in keyPlayers {
             engine.disconnectNodeOutput(kp.player)
             engine.disconnectNodeOutput(kp.timePitch)
-            engine.connect(kp.player, to: kp.timePitch, format: format)
-            engine.connect(kp.timePitch, to: engine.mainMixerNode, format: format)
+            engine.connect(kp.player, to: kp.timePitch, format: stereoFormat)
+            engine.connect(kp.timePitch, to: engine.mainMixerNode, format: stereoFormat)
         }
 
         // Connect beat overlay: beatLoopPlayer → beatLoopTimePitch → mixer
         engine.disconnectNodeOutput(beatLoopPlayer)
         engine.disconnectNodeOutput(beatLoopTimePitch)
-        if let beatFmt = beatLoopFormat ?? audioFormat {
-            engine.connect(beatLoopPlayer, to: beatLoopTimePitch, format: beatFmt)
-            engine.connect(beatLoopTimePitch, to: engine.mainMixerNode, format: beatFmt)
-        }
+        let beatFmt = beatLoopFormat ?? monoFormat
+        engine.connect(beatLoopPlayer, to: beatLoopTimePitch, format: beatFmt)
+        engine.connect(beatLoopTimePitch, to: engine.mainMixerNode, format: beatFmt)
 
         do {
             try engine.start()
@@ -368,13 +384,16 @@ final class SampleEngine: ObservableObject {
     }
 
     /// Reconnects the main playback chain based on mode.
-    /// Turntable: player → varispeed → EQ → mixer (true vinyl repitch)
-    /// Other modes: player → timePitch → EQ → mixer (phase vocoder)
+    /// Turntable: player → varispeed → EQ → [M/S] → mixer
+    /// Other modes: player → timePitch → EQ → [M/S] → mixer
     private func reconnectMainChain(format: AVAudioFormat) {
         engine.disconnectNodeOutput(playerNode)
         engine.disconnectNodeOutput(timePitchNode)
         engine.disconnectNodeOutput(varispeedNode)
         engine.disconnectNodeOutput(eqNode)
+        if let msUnit = midSideUnit {
+            engine.disconnectNodeOutput(msUnit)
+        }
 
         if mode == .turntable {
             engine.connect(playerNode, to: varispeedNode, format: format)
@@ -383,7 +402,13 @@ final class SampleEngine: ObservableObject {
             engine.connect(playerNode, to: timePitchNode, format: format)
             engine.connect(timePitchNode, to: eqNode, format: format)
         }
-        engine.connect(eqNode, to: engine.mainMixerNode, format: format)
+
+        if let msUnit = midSideUnit {
+            engine.connect(eqNode, to: msUnit, format: format)
+            engine.connect(msUnit, to: engine.mainMixerNode, format: format)
+        } else {
+            engine.connect(eqNode, to: engine.mainMixerNode, format: format)
+        }
         updatePitchSpeedNodes()
     }
 
@@ -546,15 +571,19 @@ final class SampleEngine: ObservableObject {
         high.bypass = false
     }
 
-    /// Set EQ band gain in dB. bandIndex: 0=low, 1=mid, 2=high. Range: -26 to +6
+    /// Set EQ band gain in dB. bandIndex: 0=low, 1=mid, 2=high. Range: -96 to +12.
+    /// At -96 dB the band is effectively killed (inaudible).
     func setEQBand(_ bandIndex: Int, gain: Float) {
         guard bandIndex >= 0 && bandIndex < 3 else { return }
-        eqNode.bands[bandIndex].gain = max(-26, min(6, gain))
+        let clamped = max(-96, min(12, gain))
+        eqNode.bands[bandIndex].bypass = false
+        eqNode.bands[bandIndex].gain = clamped
     }
 
     /// Reset all EQ bands to flat (0 dB)
     func resetEQ() {
         for i in 0..<3 {
+            eqNode.bands[i].bypass = false
             eqNode.bands[i].gain = 0
         }
     }
@@ -562,6 +591,35 @@ final class SampleEngine: ObservableObject {
     /// Set stereo pan position (-1.0 = full left, 0 = center, +1.0 = full right)
     func setPan(_ value: Float) {
         playerNode.pan = max(-1, min(1, value))
+    }
+
+    /// Set real-time Mid/Side parameters. Gains in dB, crossover in Hz (0 = off).
+    func setMidSide(mid: Float, side: Float, crossover: Float) {
+        guard let au = midSideAU else { return }
+        au.midGain = mid <= -90 ? 0 : pow(10, mid / 20)
+        au.sideGain = side <= -90 ? 0 : pow(10, side / 20)
+        au.crossoverHz = crossover
+    }
+
+    // MARK: - Mid/Side Node Setup
+
+    private func setupMidSideNode() {
+        MidSideAU.register()
+        AVAudioUnit.instantiate(with: MidSideAU.componentDescription) { [weak self] unit, error in
+            Task { @MainActor in
+                guard let self, let unit else {
+                    print("Failed to create MidSide AU: \(error?.localizedDescription ?? "unknown")")
+                    return
+                }
+                self.midSideUnit = unit
+                self.midSideAU = unit.auAudioUnit as? MidSideAU
+                self.engine.attach(unit)
+                // If a sample is already loaded, reconnect chain to include M/S
+                if let format = self.audioFormat {
+                    self.reconnectMainChain(format: format)
+                }
+            }
+        }
     }
 
     // MARK: - Metronome

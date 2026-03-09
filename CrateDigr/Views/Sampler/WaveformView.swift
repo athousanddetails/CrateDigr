@@ -130,7 +130,9 @@ struct WaveformView: View {
                     Canvas { context, size in
                         drawGrid(context: context, size: size)
                         drawLoopRegion(context: context, size: size)
-                        if vm.showSpectrogram {
+                        if vm.showStereoWaveform {
+                            drawStereoWaveform(context: context, size: size)
+                        } else if vm.showSpectrogram {
                             drawSpectrogram(context: context, size: size)
                         } else {
                             drawWaveform(context: context, size: size)
@@ -709,6 +711,102 @@ struct WaveformView: View {
         // 4. Draw overall outline for definition
         drawWaveformOutline(context: context, size: size, data: data,
                            visibleStart: visibleStart, visibleEnd: visibleEnd)
+    }
+
+    // MARK: - Stereo L/R Waveform
+
+    private func drawStereoWaveform(context: GraphicsContext, size: CGSize) {
+        let data = vm.stereoWaveformData
+        guard !data.isEmpty else { return }
+
+        let colorData = vm.frequencyColorData
+        let totalBuckets = data.count
+        let visibleStart = vm.waveformOffset / (size.width * vm.waveformZoom) * CGFloat(totalBuckets)
+        let visibleEnd = (vm.waveformOffset + size.width) / (size.width * vm.waveformZoom) * CGFloat(totalBuckets)
+        guard visibleStart < visibleEnd else { return }
+
+        let halfH = size.height / 2
+        let lCenter = halfH * 0.5          // Center of top (L) half
+        let rCenter = halfH + halfH * 0.5  // Center of bottom (R) half
+        let scale: CGFloat = 0.9
+        let pixelCount = Int(size.width)
+        let hasColorData = !colorData.isEmpty && colorData.count == data.count
+
+        if hasColorData {
+            // 3-band Rekordbox-style coloring for each channel
+            // Use frequency band ratios from mono data, scaled by per-channel amplitude
+            for (centerY, useLeft) in [(lCenter, true), (rCenter, false)] {
+                for (bandKP, bandColor, opacity) in [
+                    (\(low: Float, mid: Float, high: Float).low, lowColor, 0.85),
+                    (\(low: Float, mid: Float, high: Float).mid, midColor, 0.8),
+                    (\(low: Float, mid: Float, high: Float).high, highColor, 0.75)
+                ] as [(KeyPath<(low: Float, mid: Float, high: Float), Float>, Color, Double)] {
+                    var path = Path()
+                    path.move(to: CGPoint(x: 0, y: centerY))
+                    for x in 0..<pixelCount {
+                        let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
+                        let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
+                        let amp = CGFloat(colorData[idx][keyPath: bandKP])
+                        path.addLine(to: CGPoint(x: CGFloat(x), y: centerY - amp * halfH * 0.5 * scale))
+                    }
+                    for x in stride(from: pixelCount - 1, through: 0, by: -1) {
+                        let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
+                        let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
+                        let amp = CGFloat(colorData[idx][keyPath: bandKP])
+                        path.addLine(to: CGPoint(x: CGFloat(x), y: centerY + amp * halfH * 0.5 * scale))
+                    }
+                    path.closeSubpath()
+                    context.fill(path, with: .color(bandColor.opacity(opacity)))
+                }
+
+                // Outline for each channel (using stereo amplitude data)
+                var outline = Path()
+                for x in 0..<pixelCount {
+                    let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
+                    let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
+                    let maxVal = useLeft ? data[idx].leftMax : data[idx].rightMax
+                    let y = centerY - CGFloat(maxVal) * halfH * 0.5 * scale
+                    if x == 0 { outline.move(to: CGPoint(x: 0, y: y)) }
+                    else { outline.addLine(to: CGPoint(x: CGFloat(x), y: y)) }
+                }
+                context.stroke(outline, with: .color(Color.white.opacity(0.25)), lineWidth: 0.5)
+            }
+        } else {
+            // Fallback: single color for each channel
+            let waveColor = Color(red: 0.2, green: 0.6, blue: 0.85)
+            let ampScale = halfH * 0.45
+
+            for (centerY, useLeft) in [(lCenter, true), (rCenter, false)] {
+                var path = Path()
+                path.move(to: CGPoint(x: 0, y: centerY))
+                for x in 0..<pixelCount {
+                    let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
+                    let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
+                    let maxVal = useLeft ? data[idx].leftMax : data[idx].rightMax
+                    path.addLine(to: CGPoint(x: CGFloat(x), y: centerY - CGFloat(maxVal) * ampScale))
+                }
+                for x in stride(from: pixelCount - 1, through: 0, by: -1) {
+                    let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
+                    let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
+                    let minVal = useLeft ? data[idx].leftMin : data[idx].rightMin
+                    path.addLine(to: CGPoint(x: CGFloat(x), y: centerY - CGFloat(minVal) * ampScale))
+                }
+                path.closeSubpath()
+                context.fill(path, with: .color(waveColor.opacity(0.55)))
+            }
+        }
+
+        // Center divider
+        var divider = Path()
+        divider.move(to: CGPoint(x: 0, y: halfH))
+        divider.addLine(to: CGPoint(x: size.width, y: halfH))
+        context.stroke(divider, with: .color(.gray.opacity(0.5)), lineWidth: 0.5)
+
+        // Subtle L/R labels
+        context.draw(Text("L").font(.system(size: 9, weight: .semibold)).foregroundColor(.white.opacity(0.35)),
+                     at: CGPoint(x: 12, y: 12))
+        context.draw(Text("R").font(.system(size: 9, weight: .semibold)).foregroundColor(.white.opacity(0.35)),
+                     at: CGPoint(x: 12, y: halfH + 12))
     }
 
     private func drawBandFill(context: GraphicsContext, pixelCount: Int, centerY: CGFloat, scale: CGFloat,

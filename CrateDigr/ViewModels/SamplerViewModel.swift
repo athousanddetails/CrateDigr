@@ -159,6 +159,7 @@ final class SamplerViewModel: ObservableObject {
     struct PreFocusState {
         let sampleFile: SampleFile
         let waveformData: [(min: Float, max: Float)]
+        let stereoWaveformData: [(leftMin: Float, leftMax: Float, rightMin: Float, rightMax: Float)]
         let frequencyColorData: [(low: Float, mid: Float, high: Float)]
         let sliceMarkers: [SliceMarker]
         let loopRegion: LoopRegion?
@@ -182,6 +183,10 @@ final class SamplerViewModel: ObservableObject {
     // MARK: - Spectrogram
     @Published var showSpectrogram = false
     @Published var spectrogramData: SpectrogramData?
+
+    // MARK: - Stereo Waveform
+    @Published var showStereoWaveform = false
+    @Published var stereoWaveformData: [(leftMin: Float, leftMax: Float, rightMin: Float, rightMax: Float)] = []
 
     // MARK: - UI
     @Published var activePanel: SamplerToolPanel = .pitchSpeed
@@ -275,6 +280,7 @@ final class SamplerViewModel: ObservableObject {
 
                 // Compute basic waveform (vDSP-accelerated, very fast)
                 let waveform = file.waveformData(bucketCount: 4000)
+                let stereoWaveform = file.waveformDataStereo(bucketCount: 4000)
 
                 // Check we're still the active load
                 guard self.loadGeneration == myGeneration else { return }
@@ -282,6 +288,7 @@ final class SamplerViewModel: ObservableObject {
                 // Display immediately — waveform visible, playback ready
                 self.sampleFile = file
                 self.waveformData = waveform
+                self.stereoWaveformData = stereoWaveform
                 self.frequencyColorData = []  // Will be filled by Phase 2
                 self.targetBPM = 120
                 self.manualBPM = 120
@@ -290,6 +297,7 @@ final class SamplerViewModel: ObservableObject {
 
                 // Load into engine — playback available NOW
                 engine.loadSample(file)
+                syncEngineState()
 
                 // Reset state
                 self.sliceMarkers = []
@@ -322,6 +330,11 @@ final class SamplerViewModel: ObservableObject {
                 self.targetBPM = Double(analysis.bpm)
                 self.manualBPM = Double(analysis.bpm)
                 self.drumPattern.bpm = Double(analysis.bpm)
+
+                // Apply detected grid phase (beat 1 on kick)
+                if analysis.gridOffsetSamples > 0 {
+                    self.gridOffsetSamples = analysis.gridOffsetSamples
+                }
 
                 // Compute frequency color data on background thread
                 let colorData = await Task.detached(priority: .userInitiated) {
@@ -442,10 +455,52 @@ final class SamplerViewModel: ObservableObject {
         engine.setPan(pan)
     }
 
+    func updateMidGain(_ value: Float) {
+        midGain = value
+        syncMidSideToEngine()
+    }
+
+    func updateSideGain(_ value: Float) {
+        sideGain = value
+        syncMidSideToEngine()
+    }
+
+    func updateMsCrossover(_ value: Float) {
+        msCrossover = value
+        syncMidSideToEngine()
+    }
+
     func resetMidSide() {
         midGain = 0
         sideGain = 0
         msCrossover = 0
+        syncMidSideToEngine()
+    }
+
+    private func syncMidSideToEngine() {
+        engine.setMidSide(mid: midGain, side: sideGain, crossover: msCrossover)
+    }
+
+    /// Re-sync all DSP state to the engine after a loadSample call.
+    /// EQ band gains, M/S, and Pan are lost when the engine reconnects nodes.
+    private func syncEngineState() {
+        engine.setEQBand(0, gain: eqLow)
+        engine.setEQBand(1, gain: eqMid)
+        engine.setEQBand(2, gain: eqHigh)
+        engine.setPan(pan)
+        syncMidSideToEngine()
+    }
+
+    func resetAllEQPanMS() {
+        resetEQ()
+        updatePan(0)
+        resetMidSide()
+    }
+
+    /// Update both mono and stereo waveform data from a SampleFile
+    func updateWaveformData(from file: SampleFile, bucketCount: Int = 4000) {
+        waveformData = file.waveformData(bucketCount: bucketCount)
+        stereoWaveformData = file.waveformDataStereo(bucketCount: bucketCount)
     }
 
     // MARK: - Beat Overlay
@@ -1040,6 +1095,7 @@ final class SamplerViewModel: ObservableObject {
         preFocusState = PreFocusState(
             sampleFile: sf,
             waveformData: waveformData,
+            stereoWaveformData: stereoWaveformData,
             frequencyColorData: frequencyColorData,
             sliceMarkers: sliceMarkers,
             loopRegion: loopRegion,
@@ -1054,10 +1110,14 @@ final class SamplerViewModel: ObservableObject {
         let endIdx = min(sf.totalSamples, region.endSample)
         guard endIdx > startIdx else { return }
         let subSamples = Array(sf.samples[startIdx..<endIdx])
+        let subLeft = Array(sf.leftSamples[startIdx..<endIdx])
+        let subRight = Array(sf.rightSamples[startIdx..<endIdx])
 
         var focusFile = SampleFile(
             url: sf.url,
             samples: subSamples,
+            leftSamples: subLeft,
+            rightSamples: subRight,
             sampleRate: sf.sampleRate,
             channelCount: sf.channelCount,
             duration: Double(subSamples.count) / sf.sampleRate
@@ -1072,9 +1132,10 @@ final class SamplerViewModel: ObservableObject {
 
         // Load focused region
         sampleFile = focusFile
-        waveformData = focusFile.waveformData(bucketCount: 4000)
+        updateWaveformData(from: focusFile)
         frequencyColorData = []
         engine.loadSample(focusFile)
+        syncEngineState()
 
         sliceMarkers = []
         currentPosition = 0
@@ -1106,6 +1167,7 @@ final class SamplerViewModel: ObservableObject {
 
         sampleFile = state.sampleFile
         waveformData = state.waveformData
+        stereoWaveformData = state.stereoWaveformData
         frequencyColorData = state.frequencyColorData
         sliceMarkers = state.sliceMarkers
         loopRegion = state.loopRegion
@@ -1114,6 +1176,7 @@ final class SamplerViewModel: ObservableObject {
         waveformZoom = state.waveformZoom
         waveformOffset = state.waveformOffset
         engine.loadSample(state.sampleFile)
+        syncEngineState()
 
         preFocusState = nil
         isFocusMode = false
@@ -1201,8 +1264,9 @@ final class SamplerViewModel: ObservableObject {
                 let savedLoopEnabled = loopEnabled
 
                 sampleFile = original
-                waveformData = original.waveformData(bucketCount: 4000)
+                updateWaveformData(from: original)
                 engine.loadSample(original)
+                syncEngineState()
                 currentPosition = pos
                 engine.currentPosition = pos
 
@@ -1261,8 +1325,10 @@ final class SamplerViewModel: ObservableObject {
         var newFile = SampleFile(
             url: original.url,
             samples: processed,
+            leftSamples: processed,
+            rightSamples: processed,
             sampleRate: original.sampleRate,
-            channelCount: original.channelCount,
+            channelCount: 1,
             duration: original.duration
         )
         newFile.bpm = original.bpm
@@ -1276,8 +1342,9 @@ final class SamplerViewModel: ObservableObject {
         let savedLoopEnabled = loopEnabled
 
         sampleFile = newFile
-        waveformData = newFile.waveformData(bucketCount: 4000)
+        updateWaveformData(from: newFile)
         engine.loadSample(newFile)
+        syncEngineState()
         currentPosition = pos
         engine.currentPosition = pos
 
@@ -1324,8 +1391,10 @@ final class SamplerViewModel: ObservableObject {
         var newFile = SampleFile(
             url: sf.url,
             samples: processed,
+            leftSamples: processed,
+            rightSamples: processed,
             sampleRate: sf.sampleRate,
-            channelCount: sf.channelCount,
+            channelCount: 1,
             duration: sf.duration
         )
         newFile.bpm = sf.bpm
@@ -1337,8 +1406,9 @@ final class SamplerViewModel: ObservableObject {
         lofiEnabled = false
 
         sampleFile = newFile
-        waveformData = newFile.waveformData(bucketCount: 4000)
+        updateWaveformData(from: newFile)
         engine.loadSample(newFile)
+        syncEngineState()
 
         Task {
             let colorData = await Task.detached(priority: .userInitiated) {
@@ -1351,8 +1421,9 @@ final class SamplerViewModel: ObservableObject {
     func undoLoFi() {
         guard let original = lofiUndoSamples else { return }
         sampleFile = original
-        waveformData = original.waveformData(bucketCount: 4000)
+        updateWaveformData(from: original)
         engine.loadSample(original)
+        syncEngineState()
         lofiUndoSamples = nil
         lofiOriginalSamples = nil
         lofiEnabled = false

@@ -1,11 +1,13 @@
 import Foundation
 import AVFoundation
 import Accelerate
+import CLibAubio
 
 struct AudioAnalysisResult {
     let bpm: Int
     let key: String       // e.g. "C", "F#", "Bb"
     let scale: String     // "Major" or "Minor"
+    let gridOffsetSamples: Int  // Optimal phase offset for beat 1 (sample position)
 
     var keyString: String {
         "\(key) \(scale)"
@@ -48,9 +50,9 @@ final class AudioAnalyzer {
 
     /// Analyze pre-loaded samples (no file I/O — uses samples already in memory)
     func analyze(samples: [Float], sampleRate: Double) -> AudioAnalysisResult {
-        let bpm = detectBPM(samples: samples, sampleRate: sampleRate)
+        let (bpm, gridOffset) = detectBPM(samples: samples, sampleRate: sampleRate)
         let (key, scale) = detectKey(samples: samples, sampleRate: sampleRate)
-        return AudioAnalysisResult(bpm: bpm, key: key, scale: scale)
+        return AudioAnalysisResult(bpm: bpm, key: key, scale: scale, gridOffsetSamples: gridOffset)
     }
 
     /// Legacy: Analyze from file URL (reads the file)
@@ -110,74 +112,68 @@ final class AudioAnalyzer {
         return AudioData(samples: monoSamples, sampleRate: sampleRate)
     }
 
-    // MARK: - BPM Detection via onset strength + autocorrelation
+    // MARK: - BPM Detection via aubio (tempo detection + beat tracking)
 
-    private func detectBPM(samples: [Float], sampleRate: Double) -> Int {
-        let hopSize = 512
-        let windowSize = 1024
+    /// Returns (bpm, gridOffsetSamples) — the detected tempo and optimal phase for beat 1.
+    /// Uses aubio's battle-tested tempo detection: adaptive onset detection, autocorrelation
+    /// with comb filtering, and causal beat tracking.
+    private func detectBPM(samples: [Float], sampleRate: Double) -> (Int, Int) {
         let totalFrames = samples.count
+        let hopSize: UInt32 = 512
+        let bufSize: UInt32 = 1024
+        let sr = UInt32(sampleRate)
 
-        guard totalFrames > windowSize else { return 120 }
+        guard totalFrames > Int(bufSize) * 2 else { return (120, 0) }
 
-        // Compute spectral flux (onset strength)
-        var onsetStrength: [Float] = []
-        var prevMagnitudes = [Float](repeating: 0, count: windowSize / 2)
+        // Create aubio tempo detector
+        guard let tempo = new_aubio_tempo("default", bufSize, hopSize, sr) else {
+            return (120, 0)
+        }
+        defer { del_aubio_tempo(tempo) }
 
-        let window = vDSP.window(ofType: Float.self, usingSequence: .hanningNormalized, count: windowSize, isHalfWindow: false)
-
-        var frameStart = 0
-        while frameStart + windowSize <= totalFrames {
-            var frame = Array(samples[frameStart..<frameStart + windowSize])
-            vDSP_vmul(frame, 1, window, 1, &frame, 1, vDSP_Length(windowSize))
-
-            let magnitudes = computeFFTMagnitudes(frame)
-
-            // Half-wave rectified spectral flux
-            var flux: Float = 0
-            for i in 0..<min(magnitudes.count, prevMagnitudes.count) {
-                let diff = magnitudes[i] - prevMagnitudes[i]
-                if diff > 0 { flux += diff }
-            }
-            onsetStrength.append(flux)
-            prevMagnitudes = magnitudes
-            frameStart += hopSize
+        // Create input/output buffers
+        guard let input = new_fvec(hopSize),
+              let output = new_fvec(2) else {
+            return (120, 0)
+        }
+        defer {
+            del_fvec(input)
+            del_fvec(output)
         }
 
-        guard onsetStrength.count > 2 else { return 120 }
+        // Feed audio through aubio in hop-sized chunks, collect beat positions
+        var beatPositions: [Int] = []
+        var offset = 0
 
-        // Autocorrelation of onset strength
-        let onsetCount = onsetStrength.count
-        let maxLag = onsetCount / 2
-        var autocorrelation = [Float](repeating: 0, count: maxLag)
-
-        for lag in 0..<maxLag {
-            var sum: Float = 0
-            for i in 0..<(onsetCount - lag) {
-                sum += onsetStrength[i] * onsetStrength[i + lag]
+        while offset + Int(hopSize) <= totalFrames {
+            // Copy samples into aubio input buffer
+            for i in 0..<Int(hopSize) {
+                fvec_set_sample(input, samples[offset + i], UInt32(i))
             }
-            autocorrelation[lag] = sum / Float(onsetCount - lag)
+
+            // Run tempo detection on this chunk
+            aubio_tempo_do(tempo, input, output)
+
+            // Check if a beat was detected (output[0] != 0)
+            if fvec_get_sample(output, 0) != 0 {
+                let beatSample = Int(aubio_tempo_get_last(tempo))
+                beatPositions.append(beatSample)
+            }
+
+            offset += Int(hopSize)
         }
 
-        // Convert lag to BPM range (60-200 BPM)
-        let framesPerSecond = sampleRate / Double(hopSize)
-        let minLag = Int(framesPerSecond * 60.0 / 200.0) // 200 BPM
-        let maxValidLag = Int(framesPerSecond * 60.0 / 60.0) // 60 BPM
+        // Get BPM from aubio
+        var detectedBPM = Float(aubio_tempo_get_bpm(tempo))
 
-        guard minLag < maxValidLag, maxValidLag < maxLag else { return 120 }
-
-        // Find the peak in the valid BPM range
-        var bestLag = minLag
-        var bestValue: Float = -Float.infinity
-
-        for lag in minLag...min(maxValidLag, maxLag - 1) {
-            if autocorrelation[lag] > bestValue {
-                bestValue = autocorrelation[lag]
-                bestLag = lag
-            }
+        // If aubio couldn't determine BPM, fall back
+        if detectedBPM <= 0 || detectedBPM.isNaN {
+            detectedBPM = 120
         }
 
-        let bpm = 60.0 * framesPerSecond / Double(bestLag)
-        return Int(round(bpm))
+        // Grid starts at 0 — user can nudge if needed
+        let bpmResult = Int(round(detectedBPM))
+        return (bpmResult, 0)
     }
 
     // MARK: - Key Detection via chroma analysis

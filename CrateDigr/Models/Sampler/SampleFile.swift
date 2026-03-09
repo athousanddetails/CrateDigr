@@ -5,7 +5,9 @@ import Accelerate
 struct SampleFile: Identifiable {
     let id = UUID()
     let url: URL
-    let samples: [Float]           // Mono float samples
+    let samples: [Float]           // Mono float samples (mixdown)
+    let leftSamples: [Float]       // Left channel (or mono if source is mono)
+    let rightSamples: [Float]      // Right channel (or mono if source is mono)
     let sampleRate: Double
     let channelCount: Int
     let duration: TimeInterval
@@ -65,6 +67,34 @@ struct SampleFile: Identifiable {
                 vDSP_minv(base + start, 1, &minVal, vDSP_Length(count))
                 vDSP_maxv(base + start, 1, &maxVal, vDSP_Length(count))
                 result.append((minVal, maxVal))
+            }
+        }
+        return result
+    }
+
+    /// Compute per-channel waveform data for stereo display
+    func waveformDataStereo(bucketCount: Int) -> [(leftMin: Float, leftMax: Float, rightMin: Float, rightMax: Float)] {
+        guard !leftSamples.isEmpty, bucketCount > 0 else { return [] }
+        let samplesPerBucket = max(1, leftSamples.count / bucketCount)
+        var result: [(leftMin: Float, leftMax: Float, rightMin: Float, rightMax: Float)] = []
+        result.reserveCapacity(bucketCount)
+
+        leftSamples.withUnsafeBufferPointer { lPtr in
+            rightSamples.withUnsafeBufferPointer { rPtr in
+                let lBase = lPtr.baseAddress!
+                let rBase = rPtr.baseAddress!
+                for i in 0..<bucketCount {
+                    let start = i * samplesPerBucket
+                    let end = min(start + samplesPerBucket, leftSamples.count)
+                    let count = end - start
+                    guard count > 0 else { result.append((0, 0, 0, 0)); continue }
+                    var lMin: Float = 0, lMax: Float = 0, rMin: Float = 0, rMax: Float = 0
+                    vDSP_minv(lBase + start, 1, &lMin, vDSP_Length(count))
+                    vDSP_maxv(lBase + start, 1, &lMax, vDSP_Length(count))
+                    vDSP_minv(rBase + start, 1, &rMin, vDSP_Length(count))
+                    vDSP_maxv(rBase + start, 1, &rMax, vDSP_Length(count))
+                    result.append((lMin, lMax, rMin, rMax))
+                }
             }
         }
         return result
@@ -208,22 +238,30 @@ struct SampleFile: Identifiable {
         }
 
         let channelCount = Int(format.channelCount)
-        var monoSamples = [Float](repeating: 0, count: Int(frameCount))
+        let count = Int(frameCount)
+
+        // Store per-channel data
+        let leftSamples: [Float]
+        let rightSamples: [Float]
 
         if channelCount == 1 {
-            monoSamples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(frameCount)))
+            leftSamples = Array(UnsafeBufferPointer(start: channelData[0], count: count))
+            rightSamples = leftSamples
         } else {
-            // Mix to mono
-            for ch in 0..<channelCount {
-                let ptr = channelData[ch]
-                for i in 0..<Int(frameCount) {
-                    monoSamples[i] += ptr[i]
-                }
+            leftSamples = Array(UnsafeBufferPointer(start: channelData[0], count: count))
+            rightSamples = Array(UnsafeBufferPointer(start: channelData[1], count: count))
+        }
+
+        // Mono mixdown
+        let monoSamples: [Float]
+        if channelCount == 1 {
+            monoSamples = leftSamples
+        } else {
+            var mono = [Float](repeating: 0, count: count)
+            for i in 0..<count {
+                mono[i] = (leftSamples[i] + rightSamples[i]) * 0.5
             }
-            let scale = 1.0 / Float(channelCount)
-            for i in 0..<monoSamples.count {
-                monoSamples[i] *= scale
-            }
+            monoSamples = mono
         }
 
         let duration = Double(frameCount) / format.sampleRate
@@ -231,6 +269,8 @@ struct SampleFile: Identifiable {
         return SampleFile(
             url: url,
             samples: monoSamples,
+            leftSamples: leftSamples,
+            rightSamples: rightSamples,
             sampleRate: format.sampleRate,
             channelCount: channelCount,
             duration: duration
