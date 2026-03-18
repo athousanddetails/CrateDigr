@@ -198,7 +198,7 @@ final class SamplerViewModel: ObservableObject {
     @Published var waveformOffset: CGFloat = 0
 
     @Published var showGrid = false
-    @Published var waveformHeight: CGFloat = 180  // User-resizable waveform height
+    @Published var waveformHeight: CGFloat = 500  // User-resizable waveform height (max by default)
 
     // MARK: - Services
     let engine = SampleEngine()
@@ -767,7 +767,7 @@ final class SamplerViewModel: ObservableObject {
         let samplesPerBeat = sf.sampleRate * 60.0 / eBPM
         // Nudge by 1/128th of a beat for fine-grained control
         let nudge = max(1, Int(samplesPerBeat / 128.0))
-        gridOffsetSamples = max(0, gridOffsetSamples - nudge)
+        gridOffsetSamples -= nudge  // Allow negative offset (grid before audio start)
         // Resync beat overlay to new grid position
         if engine.isBeatLoopPlaying { startBeatOverlaySynced() }
     }

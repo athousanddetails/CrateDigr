@@ -16,6 +16,7 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
     // Pipeline states
     private var bandPipeline: MTLRenderPipelineState!
     private var bandAdditivePipeline: MTLRenderPipelineState!
+    private var coloredBandPipeline: MTLRenderPipelineState!  // Rekordbox-style: per-bucket color
     private var linePipeline: MTLRenderPipelineState!
     private var quadPipeline: MTLRenderPipelineState!
     private var outlinePipeline: MTLRenderPipelineState!
@@ -76,28 +77,31 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
     private var sliceMarkers: [SliceMarker] = []
     private var showStereo: Bool = false
 
-    // MARK: - Industry Standard DJ Colors
+    // MARK: - 3-Band Colors (matching original SwiftUI Canvas waveform)
 
-    private let lowColor  = SIMD4<Float>(0.85, 0.15, 0.15, 0.80)  // Red (bass)
-    private let midColor  = SIMD4<Float>(0.15, 0.80, 0.20, 0.75)  // Green (mids)
-    private let highColor = SIMD4<Float>(0.20, 0.60, 0.95, 0.70)  // Blue/cyan (highs)
+    private let lowColor  = SIMD4<Float>(0.15, 0.35, 0.95, 0.85)  // Deep blue (bass/kicks)
+    private let midColor  = SIMD4<Float>(0.95, 0.65, 0.10, 0.80)  // Amber/orange (mids/snares)
+    private let highColor = SIMD4<Float>(0.92, 0.92, 0.95, 0.75)  // Near-white (highs/hihats)
 
-    // MARK: - Cached Buffers
+    // MARK: - Cached Buffers (3 separate band amplitude buffers)
 
     private var lastLODLevel: Int = -1
-    private var bandBufferLow: MTLBuffer?
-    private var bandBufferMid: MTLBuffer?
-    private var bandBufferHigh: MTLBuffer?
+    private var lastFileID: String = ""   // Detect track changes
+
+    // Mono: 3 band buffers + outline
+    private var lowBandBuffer: MTLBuffer?
+    private var midBandBuffer: MTLBuffer?
+    private var highBandBuffer: MTLBuffer?
     private var outlineBuffer: MTLBuffer?
     private var cachedBucketCount: Int = 0
 
-    // Stereo buffers
-    private var stereoBandBufferLowL: MTLBuffer?
-    private var stereoBandBufferMidL: MTLBuffer?
-    private var stereoBandBufferHighL: MTLBuffer?
-    private var stereoBandBufferLowR: MTLBuffer?
-    private var stereoBandBufferMidR: MTLBuffer?
-    private var stereoBandBufferHighR: MTLBuffer?
+    // Stereo: 3 band buffers per channel + outlines
+    private var stereoLowBufferL: MTLBuffer?
+    private var stereoMidBufferL: MTLBuffer?
+    private var stereoHighBufferL: MTLBuffer?
+    private var stereoLowBufferR: MTLBuffer?
+    private var stereoMidBufferR: MTLBuffer?
+    private var stereoHighBufferR: MTLBuffer?
     private var stereoOutlineBufferL: MTLBuffer?
     private var stereoOutlineBufferR: MTLBuffer?
 
@@ -175,6 +179,22 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
             addDesc.colorAttachments[0].sourceAlphaBlendFactor = .one
             addDesc.colorAttachments[0].destinationAlphaBlendFactor = .one
             bandAdditivePipeline = try? device.makeRenderPipelineState(descriptor: addDesc)
+        }
+
+        // Colored band pipeline (Rekordbox-style: per-bucket color from buffer)
+        if let vs = library.makeFunction(name: "coloredWaveformVertex"),
+           let fs = library.makeFunction(name: "waveformBandFragment") {
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = vs
+            desc.fragmentFunction = fs
+            desc.rasterSampleCount = sampleCount
+            desc.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
+            desc.colorAttachments[0].isBlendingEnabled = true
+            desc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            desc.colorAttachments[0].sourceAlphaBlendFactor = .one
+            desc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            coloredBandPipeline = try? device.makeRenderPipelineState(descriptor: desc)
         }
 
         // Line pipeline
@@ -259,11 +279,20 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
     private func selectLODAndUpdateBuffers(viewWidth: Float) {
         guard let vm = viewModel else { return }
 
+        // Detect track change — force full buffer rebuild
+        let currentFileID = vm.sampleFile?.url.lastPathComponent ?? ""
+        let fileChanged = currentFileID != lastFileID
+        if fileChanged {
+            lastFileID = currentFileID
+            lastLODLevel = -1
+            cachedBucketCount = 0
+        }
+
         if let lod = vm.waveformLOD, !lod.levels.isEmpty {
             let level = lod.selectLevel(zoom: zoom, viewWidth: CGFloat(viewWidth), totalSamples: totalSamples)
             let lodLevel = lod.levels[level]
 
-            if level != lastLODLevel || cachedBucketCount != lodLevel.bucketCount {
+            if level != lastLODLevel || cachedBucketCount != lodLevel.bucketCount || fileChanged {
                 lastLODLevel = level
                 cachedBucketCount = lodLevel.bucketCount
                 currentColorData = lodLevel.color
@@ -273,7 +302,7 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
             }
         } else if !vm.frequencyColorData.isEmpty {
             let colorData = vm.frequencyColorData
-            if cachedBucketCount != colorData.count {
+            if cachedBucketCount != colorData.count || fileChanged {
                 cachedBucketCount = colorData.count
                 currentColorData = colorData
                 currentMonoData = vm.waveformData
@@ -282,7 +311,7 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
             }
         } else if !vm.waveformData.isEmpty {
             let monoData = vm.waveformData
-            if cachedBucketCount != monoData.count {
+            if cachedBucketCount != monoData.count || fileChanged {
                 cachedBucketCount = monoData.count
                 currentColorData = []
                 currentMonoData = monoData
@@ -353,54 +382,44 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
         commandBuffer.commit()
     }
 
-    // MARK: - Buffer Building
+    // MARK: - Buffer Building (3 separate bands, like original SwiftUI Canvas)
 
     private func rebuildBuffers(colorData: [(low: Float, mid: Float, high: Float)],
                                 monoData: [(min: Float, max: Float)],
                                 stereoData: [(leftMin: Float, leftMax: Float, rightMin: Float, rightMax: Float)]) {
+        // 3 separate band amplitude buffers — each band's filtered amplitude = its height
         if !colorData.isEmpty {
             let lowAmps = colorData.map { $0.low }
             let midAmps = colorData.map { $0.mid }
             let highAmps = colorData.map { $0.high }
-            bandBufferLow = makeBuffer(lowAmps)
-            bandBufferMid = makeBuffer(midAmps)
-            bandBufferHigh = makeBuffer(highAmps)
+            lowBandBuffer = makeBuffer(lowAmps)
+            midBandBuffer = makeBuffer(midAmps)
+            highBandBuffer = makeBuffer(highAmps)
         } else {
-            // Fallback: use mono max as single band
-            let amps = monoData.map { max(abs($0.min), abs($0.max)) }
-            bandBufferLow = makeBuffer(amps)
-            bandBufferMid = nil
-            bandBufferHigh = nil
+            // Fallback: use mono amplitude as single blue band
+            let monoAmps = monoData.map { max(abs($0.min), abs($0.max)) }
+            lowBandBuffer = makeBuffer(monoAmps)
+            midBandBuffer = nil
+            highBandBuffer = nil
         }
 
-        // Outline data: (min, max) pairs as SIMD2<Float>
+        // Outline from mono envelope (for edge definition)
         let minMax = monoData.map { SIMD2<Float>($0.min, $0.max) }
         outlineBuffer = device.makeBuffer(bytes: minMax, length: minMax.count * MemoryLayout<SIMD2<Float>>.stride)
 
-        // Stereo buffers
-        if !stereoData.isEmpty && !colorData.isEmpty {
-            // For stereo, we scale color bands by per-channel amplitude ratio
-            let monoMaxes = monoData.map { max(abs($0.min), abs($0.max)) }
-            let leftMaxes = stereoData.map { max(abs($0.leftMin), abs($0.leftMax)) }
-            let rightMaxes = stereoData.map { max(abs($0.rightMin), abs($0.rightMax)) }
-
-            func scaledBand(_ band: [Float], _ channelMax: [Float], _ monoMax: [Float]) -> [Float] {
-                return zip(band, zip(channelMax, monoMax)).map { (b, cm) in
-                    let (ch, mn) = cm
-                    return mn > 0.001 ? b * (ch / mn) : b
-                }
+        // Stereo: use same color data for both channels, but stereo amplitude for outline
+        if !stereoData.isEmpty {
+            if !colorData.isEmpty {
+                let lowAmps = colorData.map { $0.low }
+                let midAmps = colorData.map { $0.mid }
+                let highAmps = colorData.map { $0.high }
+                stereoLowBufferL = makeBuffer(lowAmps)
+                stereoMidBufferL = makeBuffer(midAmps)
+                stereoHighBufferL = makeBuffer(highAmps)
+                stereoLowBufferR = makeBuffer(lowAmps)
+                stereoMidBufferR = makeBuffer(midAmps)
+                stereoHighBufferR = makeBuffer(highAmps)
             }
-
-            let lowAmps = colorData.map { $0.low }
-            let midAmps = colorData.map { $0.mid }
-            let highAmps = colorData.map { $0.high }
-
-            stereoBandBufferLowL = makeBuffer(scaledBand(lowAmps, leftMaxes, monoMaxes))
-            stereoBandBufferMidL = makeBuffer(scaledBand(midAmps, leftMaxes, monoMaxes))
-            stereoBandBufferHighL = makeBuffer(scaledBand(highAmps, leftMaxes, monoMaxes))
-            stereoBandBufferLowR = makeBuffer(scaledBand(lowAmps, rightMaxes, monoMaxes))
-            stereoBandBufferMidR = makeBuffer(scaledBand(midAmps, rightMaxes, monoMaxes))
-            stereoBandBufferHighR = makeBuffer(scaledBand(highAmps, rightMaxes, monoMaxes))
 
             let leftMinMax = stereoData.map { SIMD2<Float>($0.leftMin, $0.leftMax) }
             let rightMinMax = stereoData.map { SIMD2<Float>($0.rightMin, $0.rightMax) }
@@ -527,6 +546,10 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
     }
 
     // MARK: - Draw Mono Waveform
+    // 3 separate bands layered back-to-front (like original SwiftUI Canvas):
+    // 1. Low (blue)  — kicks/bass, tallest
+    // 2. Mid (amber)  — snares/vocals
+    // 3. High (white) — hihats/cymbals, shortest
 
     private func drawMonoWaveform(encoder: MTLRenderCommandEncoder, viewportSize: SIMD2<Float>,
                                    visibleStart: Float, visibleEnd: Float, bucketCount: Int) {
@@ -535,37 +558,17 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
         let pixelCount = Int(viewportSize.x)
         let vertexCount = pixelCount * 2
 
-        if let lowBuf = bandBufferLow, let midBuf = bandBufferMid, let highBuf = bandBufferHigh {
-            // 3-band rendering with additive blending
-            let bands: [(MTLBuffer, SIMD4<Float>)] = [
-                (lowBuf, lowColor),
-                (midBuf, midColor),
-                (highBuf, highColor)
-            ]
+        // Draw 3 bands back-to-front: low behind, high in front
+        let bands: [(MTLBuffer?, SIMD4<Float>)] = [
+            (lowBandBuffer, lowColor),     // Blue kicks — drawn first (behind)
+            (midBandBuffer, midColor),     // Amber snares — drawn second
+            (highBandBuffer, highColor)    // White hihats — drawn last (front)
+        ]
 
-            for (buffer, color) in bands {
-                var uniforms = BandUniforms(
-                    bandColor: color,
-                    viewportSize: viewportSize,
-                    visibleStart: visibleStart,
-                    visibleEnd: visibleEnd,
-                    centerY: centerY,
-                    halfHeight: halfHeight,
-                    scale: 0.9,
-                    totalBuckets: Int32(bucketCount),
-                    useAdditive: 1
-                )
-
-                encoder.setRenderPipelineState(bandAdditivePipeline)
-                encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                encoder.setVertexBytes(&uniforms, length: MemoryLayout<BandUniforms>.stride, index: 1)
-                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertexCount)
-            }
-        } else if let buf = bandBufferLow {
-            // Fallback: single band
-            let fallbackColor = SIMD4<Float>(0.2, 0.6, 0.85, 0.55)
+        for (buffer, color) in bands {
+            guard let buf = buffer else { continue }
             var uniforms = BandUniforms(
-                bandColor: fallbackColor,
+                bandColor: color,
                 viewportSize: viewportSize,
                 visibleStart: visibleStart,
                 visibleEnd: visibleEnd,
@@ -575,14 +578,13 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
                 totalBuckets: Int32(bucketCount),
                 useAdditive: 0
             )
-
             encoder.setRenderPipelineState(bandPipeline)
             encoder.setVertexBuffer(buf, offset: 0, index: 0)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<BandUniforms>.stride, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertexCount)
         }
 
-        // Outline with glow
+        // Subtle outline glow on overall envelope
         if let outBuf = outlineBuffer, outlinePipeline != nil {
             let monoCount = max(currentMonoData.count, cachedBucketCount)
             var outUni = OutlineUniforms(
@@ -593,8 +595,8 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
                 halfHeight: halfHeight,
                 scale: 0.9,
                 totalBuckets: Int32(monoCount),
-                glowWidth: 3.0,
-                glowColor: SIMD4<Float>(1.0, 1.0, 1.0, 0.15)
+                glowWidth: 2.0,
+                glowColor: SIMD4<Float>(1.0, 1.0, 1.0, 0.08)
             )
 
             encoder.setRenderPipelineState(outlinePipeline)
@@ -615,16 +617,17 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
         let pixelCount = Int(viewportSize.x)
         let vertexCount = pixelCount * 2
 
+        // Left channel: 3 bands back-to-front
         let leftBands: [(MTLBuffer?, SIMD4<Float>)] = [
-            (stereoBandBufferLowL, lowColor),
-            (stereoBandBufferMidL, midColor),
-            (stereoBandBufferHighL, highColor)
+            (stereoLowBufferL, lowColor),
+            (stereoMidBufferL, midColor),
+            (stereoHighBufferL, highColor)
         ]
-
+        // Right channel: 3 bands back-to-front
         let rightBands: [(MTLBuffer?, SIMD4<Float>)] = [
-            (stereoBandBufferLowR, lowColor),
-            (stereoBandBufferMidR, midColor),
-            (stereoBandBufferHighR, highColor)
+            (stereoLowBufferR, lowColor),
+            (stereoMidBufferR, midColor),
+            (stereoHighBufferR, highColor)
         ]
 
         for (bands, centerY) in [(leftBands, lCenter), (rightBands, rCenter)] {
@@ -639,10 +642,9 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
                     halfHeight: channelHalfH,
                     scale: 0.9,
                     totalBuckets: Int32(bucketCount),
-                    useAdditive: 1
+                    useAdditive: 0
                 )
-
-                encoder.setRenderPipelineState(bandAdditivePipeline)
+                encoder.setRenderPipelineState(bandPipeline)
                 encoder.setVertexBuffer(buf, offset: 0, index: 0)
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<BandUniforms>.stride, index: 1)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertexCount)
@@ -661,19 +663,17 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
                 scale: 0.9,
                 totalBuckets: Int32(bucketCount),
                 glowWidth: 2.0,
-                glowColor: SIMD4<Float>(1.0, 1.0, 1.0, 0.12)
+                glowColor: SIMD4<Float>(1.0, 1.0, 1.0, 0.08)
             )
-
             encoder.setRenderPipelineState(outlinePipeline)
             encoder.setVertexBuffer(buf, offset: 0, index: 0)
             encoder.setVertexBytes(&outUni, length: MemoryLayout<OutlineUniforms>.stride, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: Int(viewportSize.x) * 4)
         }
 
-        // Center divider line
+        // Center divider
         var divLines: [LineVertex] = []
-        let divColor = SIMD4<Float>(0.5, 0.5, 0.5, 0.5)
-        appendHLine(&divLines, y: halfH, width: viewportSize.x, color: divColor)
+        appendHLine(&divLines, y: halfH, width: viewportSize.x, color: SIMD4<Float>(0.5, 0.5, 0.5, 0.5))
         drawLines(encoder: encoder, vertices: divLines, viewportSize: viewportSize)
     }
 
@@ -869,6 +869,34 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
 
     fragment float4 waveformBandFragment(VertexOut in [[stage_in]]) {
         return in.color;
+    }
+
+    // Rekordbox-style: single waveform with per-bucket color from buffer
+    vertex VertexOut coloredWaveformVertex(
+        uint vertexID [[vertex_id]],
+        const device float* amplitudes [[buffer(0)]],
+        constant BandUniforms& uniforms [[buffer(1)]],
+        const device float4* colors [[buffer(2)]]
+    ) {
+        uint pixelX = vertexID / 2;
+        bool isBottom = (vertexID % 2) == 1;
+        float viewWidth = uniforms.viewportSize.x;
+        float t = float(pixelX) / viewWidth;
+        float bucketF = uniforms.visibleStart + t * (uniforms.visibleEnd - uniforms.visibleStart);
+        int idx0 = clamp(int(bucketF), 0, uniforms.totalBuckets - 1);
+        int idx1 = clamp(idx0 + 1, 0, uniforms.totalBuckets - 1);
+        float frac = bucketF - float(idx0);
+        float amp = mix(amplitudes[idx0], amplitudes[idx1], frac);
+        // Interpolate color between adjacent buckets for smooth transitions
+        float4 col = mix(colors[idx0], colors[idx1], frac);
+        float x = (float(pixelX) / viewWidth) * 2.0 - 1.0;
+        float yOffset = amp * uniforms.halfHeight * uniforms.scale;
+        float y = isBottom ? (uniforms.centerY + yOffset) : (uniforms.centerY - yOffset);
+        float yNDC = 1.0 - (y / uniforms.viewportSize.y) * 2.0;
+        VertexOut out;
+        out.position = float4(x, yNDC, 0.0, 1.0);
+        out.color = col;
+        return out;
     }
 
     struct LineVertex {

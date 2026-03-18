@@ -108,39 +108,48 @@ struct SampleFile: Identifiable {
     func frequencyColorData(bucketCount: Int) -> [(low: Float, mid: Float, high: Float)] {
         guard !samples.isEmpty, bucketCount > 0 else { return [] }
 
-        // First, run 3-band IIR filter over the entire signal
         let sr = Float(sampleRate)
         let n = samples.count
 
-        // Biquad filter coefficients for 2nd-order Butterworth
-        // Low-pass at 200Hz
-        let lpCoeffs = biquadLowPass(cutoff: 200.0, sampleRate: sr)
-        // High-pass at 5000Hz
-        let hpCoeffs = biquadHighPass(cutoff: 5000.0, sampleRate: sr)
-        // Band-pass: 200-5000Hz (LP at 5000 minus LP at 200, or use two filters)
-        let bpLowCoeffs = biquadLowPass(cutoff: 5000.0, sampleRate: sr)
-        let bpHighCoeffs = biquadHighPass(cutoff: 200.0, sampleRate: sr)
+        // 4th-order Butterworth (cascade two 2nd-order) = 24dB/oct
+        // Sharp separation so mids don't leak into bass band
+        let lpCoeffs = biquadLowPass(cutoff: 300.0, sampleRate: sr)   // Bass: 0-300Hz (kick fundamental + body)
+        let hpCoeffs = biquadHighPass(cutoff: 4000.0, sampleRate: sr)  // Highs: 4kHz+ (hihats, cymbals)
+        let bpLowCoeffs = biquadLowPass(cutoff: 4000.0, sampleRate: sr)
+        let bpHighCoeffs = biquadHighPass(cutoff: 300.0, sampleRate: sr)
 
-        // Filter the signal into 3 bands
+        // Filter into 3 bands — apply each filter TWICE for 4th-order (24dB/oct)
         var lowBand = [Float](repeating: 0, count: n)
+        var lowTemp = [Float](repeating: 0, count: n)
+        applyBiquad(input: samples, output: &lowTemp, coeffs: lpCoeffs)
+        applyBiquad(input: lowTemp, output: &lowBand, coeffs: lpCoeffs)  // 2nd pass = 24dB/oct
+
         var midBand = [Float](repeating: 0, count: n)
+        var midTemp1 = [Float](repeating: 0, count: n)
+        var midTemp2 = [Float](repeating: 0, count: n)
+        applyBiquad(input: samples, output: &midTemp1, coeffs: bpHighCoeffs)
+        applyBiquad(input: midTemp1, output: &midTemp2, coeffs: bpHighCoeffs)  // 2nd pass HP
+        var midTemp3 = [Float](repeating: 0, count: n)
+        applyBiquad(input: midTemp2, output: &midTemp3, coeffs: bpLowCoeffs)
+        applyBiquad(input: midTemp3, output: &midBand, coeffs: bpLowCoeffs)    // 2nd pass LP
+
         var highBand = [Float](repeating: 0, count: n)
+        var highTemp = [Float](repeating: 0, count: n)
+        applyBiquad(input: samples, output: &highTemp, coeffs: hpCoeffs)
+        applyBiquad(input: highTemp, output: &highBand, coeffs: hpCoeffs)  // 2nd pass = 24dB/oct
 
-        // Apply low-pass filter for bass band
-        applyBiquad(input: samples, output: &lowBand, coeffs: lpCoeffs)
-
-        // Apply band-pass (high-pass 200Hz then low-pass 5000Hz) for mid band
-        var midTemp = [Float](repeating: 0, count: n)
-        applyBiquad(input: samples, output: &midTemp, coeffs: bpHighCoeffs)
-        applyBiquad(input: midTemp, output: &midBand, coeffs: bpLowCoeffs)
-
-        // Apply high-pass filter for treble band
-        applyBiquad(input: samples, output: &highBand, coeffs: hpCoeffs)
-
-        // Now downsample each band into buckets (peak amplitude per bucket)
+        // Downsample into buckets (peak amplitude per bucket)
         let samplesPerBucket = max(1, n / bucketCount)
         var result: [(low: Float, mid: Float, high: Float)] = []
         result.reserveCapacity(bucketCount)
+
+        // Track per-band global peaks for independent normalization
+        var globalLowPeak: Float = 0
+        var globalMidPeak: Float = 0
+        var globalHighPeak: Float = 0
+
+        var rawBuckets: [(low: Float, mid: Float, high: Float)] = []
+        rawBuckets.reserveCapacity(bucketCount)
 
         lowBand.withUnsafeBufferPointer { lowPtr in
             midBand.withUnsafeBufferPointer { midPtr in
@@ -154,20 +163,32 @@ struct SampleFile: Identifiable {
                         let end = min(start + samplesPerBucket, n)
                         let count = end - start
                         guard count > 0 else {
-                            result.append((0, 0, 0))
+                            rawBuckets.append((0, 0, 0))
                             continue
                         }
-                        var lowPeak: Float = 0
-                        var midPeak: Float = 0
-                        var highPeak: Float = 0
-                        vDSP_maxmgv(lowBase + start, 1, &lowPeak, vDSP_Length(count))
-                        vDSP_maxmgv(midBase + start, 1, &midPeak, vDSP_Length(count))
-                        vDSP_maxmgv(highBase + start, 1, &highPeak, vDSP_Length(count))
-                        result.append((low: lowPeak, mid: midPeak, high: highPeak))
+                        var lp: Float = 0, mp: Float = 0, hp: Float = 0
+                        vDSP_maxmgv(lowBase + start, 1, &lp, vDSP_Length(count))
+                        vDSP_maxmgv(midBase + start, 1, &mp, vDSP_Length(count))
+                        vDSP_maxmgv(highBase + start, 1, &hp, vDSP_Length(count))
+                        rawBuckets.append((low: lp, mid: mp, high: hp))
+                        globalLowPeak = max(globalLowPeak, lp)
+                        globalMidPeak = max(globalMidPeak, mp)
+                        globalHighPeak = max(globalHighPeak, hp)
                     }
                 }
             }
         }
+
+        // Normalize each band independently — kicks always show at full height
+        // regardless of how quiet the bass is relative to the mix
+        let lowNorm = globalLowPeak > 0.001 ? 1.0 / globalLowPeak : 1.0
+        let midNorm = globalMidPeak > 0.001 ? 1.0 / globalMidPeak : 1.0
+        let highNorm = globalHighPeak > 0.001 ? 1.0 / globalHighPeak : 1.0
+
+        for b in rawBuckets {
+            result.append((low: b.low * lowNorm, mid: b.mid * midNorm, high: b.high * highNorm))
+        }
+
         return result
     }
 
