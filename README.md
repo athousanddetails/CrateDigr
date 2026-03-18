@@ -53,29 +53,6 @@ bash build-app.sh
 ### Download Compiled App
 Check the [Releases](https://github.com/YOUR_USERNAME/CrateDigr/releases) page for pre-built `.app` bundles.
 
-## Project Structure
-
-```
-CrateDigr/
-├── App/                  # App entry point, constants
-├── Models/               # Data models (AudioFormat, DownloadItem, etc.)
-├── Services/             # Core services
-│   ├── Sampler/          # Audio engine, sample playback
-│   ├── YTDLPService      # YouTube download via yt-dlp
-│   ├── DemucsService     # AI stem separation
-│   └── AudioDeviceManager # CoreAudio device routing
-├── ViewModels/           # Observable state management
-├── Views/                # SwiftUI views
-│   ├── Detail/           # Download views
-│   ├── Sampler/          # Sampler tab views
-│   ├── Stems/            # Stems tab views
-│   └── Settings/         # App settings
-├── Utilities/            # Helpers (ProcessRunner, etc.)
-└── Resources/
-    ├── Assets.xcassets   # App icon
-    └── Binaries/         # yt-dlp, ffmpeg, deno, demucs (downloaded via setup script)
-```
-
 ## Bundled Tools
 
 These are downloaded by `setup-binaries.sh` and are **not** included in the git repo:
