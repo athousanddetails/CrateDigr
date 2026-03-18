@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import Accelerate
 import CLibAubio
+import CLibKeyFinder
 
 struct AudioAnalysisResult {
     let bpm: Int
@@ -34,18 +35,15 @@ final class AudioAnalyzer {
         }
     }
 
-    // MARK: - Cached FFT Setups (created once, reused across all frames)
-    private var fftSetup1024: OpaquePointer?   // for BPM detection (windowSize=1024)
-    private var fftSetup4096: OpaquePointer?   // for Key detection (windowSize=4096)
+    // MARK: - Cached FFT Setup (for BPM detection only — key detection uses libKeyFinder)
+    private var fftSetup1024: OpaquePointer?
 
     init() {
         fftSetup1024 = vDSP_create_fftsetup(vDSP_Length(log2(Float(1024))), FFTRadix(FFT_RADIX2))
-        fftSetup4096 = vDSP_create_fftsetup(vDSP_Length(log2(Float(4096))), FFTRadix(FFT_RADIX2))
     }
 
     deinit {
         if let setup = fftSetup1024 { vDSP_destroy_fftsetup(setup) }
-        if let setup = fftSetup4096 { vDSP_destroy_fftsetup(setup) }
     }
 
     /// Analyze pre-loaded samples (no file I/O — uses samples already in memory)
@@ -176,171 +174,47 @@ final class AudioAnalyzer {
         return (bpmResult, 0)
     }
 
-    // MARK: - Key Detection via chroma analysis
+    // MARK: - Key Detection via libKeyFinder (same library Mixxx uses)
+
+    /// libKeyFinder key_t enum mapping: 0=A_MAJOR, 1=A_MINOR, 2=Bb_MAJOR, ...
+    private static let keyFinderMap: [(key: String, scale: String)] = [
+        ("A", "Major"),   // 0  A_MAJOR
+        ("A", "Minor"),   // 1  A_MINOR
+        ("Bb", "Major"),  // 2  B_FLAT_MAJOR
+        ("Bb", "Minor"),  // 3  B_FLAT_MINOR
+        ("B", "Major"),   // 4  B_MAJOR
+        ("B", "Minor"),   // 5  B_MINOR
+        ("C", "Major"),   // 6  C_MAJOR
+        ("C", "Minor"),   // 7  C_MINOR
+        ("Db", "Major"),  // 8  D_FLAT_MAJOR
+        ("Db", "Minor"),  // 9  D_FLAT_MINOR
+        ("D", "Major"),   // 10 D_MAJOR
+        ("D", "Minor"),   // 11 D_MINOR
+        ("Eb", "Major"),  // 12 E_FLAT_MAJOR
+        ("Eb", "Minor"),  // 13 E_FLAT_MINOR
+        ("E", "Major"),   // 14 E_MAJOR
+        ("E", "Minor"),   // 15 E_MINOR
+        ("F", "Major"),   // 16 F_MAJOR
+        ("F", "Minor"),   // 17 F_MINOR
+        ("Gb", "Major"),  // 18 G_FLAT_MAJOR
+        ("Gb", "Minor"),  // 19 G_FLAT_MINOR
+        ("G", "Major"),   // 20 G_MAJOR
+        ("G", "Minor"),   // 21 G_MINOR
+        ("Ab", "Major"),  // 22 A_FLAT_MAJOR
+        ("Ab", "Minor"),  // 23 A_FLAT_MINOR
+    ]
 
     private func detectKey(samples: [Float], sampleRate: Double) -> (key: String, scale: String) {
-        let windowSize = 4096
-        let hopSize = 2048
-        let totalFrames = samples.count
+        guard samples.count > 4096 else { return ("C", "Major") }
 
-        guard totalFrames > windowSize else { return ("C", "Major") }
-
-        let window = vDSP.window(ofType: Float.self, usingSequence: .hanningNormalized, count: windowSize, isHalfWindow: false)
-
-        // Accumulate chroma vector
-        var chromaSum = [Float](repeating: 0, count: 12)
-        var frameCount = 0
-
-        var frameStart = 0
-        while frameStart + windowSize <= totalFrames {
-            var frame = Array(samples[frameStart..<frameStart + windowSize])
-            vDSP_vmul(frame, 1, window, 1, &frame, 1, vDSP_Length(windowSize))
-
-            let magnitudes = computeFFTMagnitudes(frame)
-            let chroma = computeChroma(magnitudes: magnitudes, sampleRate: sampleRate, fftSize: windowSize)
-
-            for i in 0..<12 {
-                chromaSum[i] += chroma[i]
-            }
-            frameCount += 1
-            frameStart += hopSize
+        let result = samples.withUnsafeBufferPointer { ptr -> Int32 in
+            keyfinder_detect_key(ptr.baseAddress, Int32(samples.count), Int32(sampleRate))
         }
 
-        guard frameCount > 0 else { return ("C", "Major") }
-
-        // Normalize
-        for i in 0..<12 {
-            chromaSum[i] /= Float(frameCount)
+        let idx = Int(result)
+        if idx >= 0 && idx < Self.keyFinderMap.count {
+            return Self.keyFinderMap[idx]
         }
-
-        // Match against key profiles (Krumhansl-Kessler profiles)
-        let majorProfile: [Float] = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
-        let minorProfile: [Float] = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
-
-        let noteNames = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
-
-        var bestCorrelation: Float = -Float.infinity
-        var bestKey = 0
-        var bestScale = "Major"
-
-        for shift in 0..<12 {
-            // Rotate chroma to test each key
-            var rotatedChroma = [Float](repeating: 0, count: 12)
-            for i in 0..<12 {
-                rotatedChroma[i] = chromaSum[(i + shift) % 12]
-            }
-
-            // Correlation with major profile
-            let majorCorr = pearsonCorrelation(rotatedChroma, majorProfile)
-            if majorCorr > bestCorrelation {
-                bestCorrelation = majorCorr
-                bestKey = shift
-                bestScale = "Major"
-            }
-
-            // Correlation with minor profile
-            let minorCorr = pearsonCorrelation(rotatedChroma, minorProfile)
-            if minorCorr > bestCorrelation {
-                bestCorrelation = minorCorr
-                bestKey = shift
-                bestScale = "Minor"
-            }
-        }
-
-        return (noteNames[bestKey], bestScale)
-    }
-
-    // MARK: - DSP Helpers
-
-    private func computeFFTMagnitudes(_ frame: [Float]) -> [Float] {
-        let n = frame.count
-        let log2n = vDSP_Length(log2(Float(n)))
-
-        // Use cached setup if available, otherwise create a temporary one
-        let cachedSetup: OpaquePointer? = (n == 1024) ? fftSetup1024 : (n == 4096) ? fftSetup4096 : nil
-        let fftSetup: OpaquePointer
-        if let cached = cachedSetup {
-            fftSetup = cached
-        } else {
-            guard let tempSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else {
-                return [Float](repeating: 0, count: n / 2)
-            }
-            fftSetup = tempSetup
-        }
-
-        var realPart = [Float](repeating: 0, count: n / 2)
-        var imagPart = [Float](repeating: 0, count: n / 2)
-
-        realPart.withUnsafeMutableBufferPointer { realBuf in
-            imagPart.withUnsafeMutableBufferPointer { imagBuf in
-                frame.withUnsafeBufferPointer { framePtr in
-                    framePtr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: n / 2) { complexPtr in
-                        var splitComplex = DSPSplitComplex(realp: realBuf.baseAddress!, imagp: imagBuf.baseAddress!)
-                        vDSP_ctoz(complexPtr, 2, &splitComplex, 1, vDSP_Length(n / 2))
-                        vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
-                    }
-                }
-            }
-        }
-
-        var magnitudes = [Float](repeating: 0, count: n / 2)
-        realPart.withUnsafeMutableBufferPointer { realBuf in
-            imagPart.withUnsafeMutableBufferPointer { imagBuf in
-                var splitComplex = DSPSplitComplex(realp: realBuf.baseAddress!, imagp: imagBuf.baseAddress!)
-                vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(n / 2))
-            }
-        }
-
-        // Square root for magnitude (not squared magnitude)
-        var sqrtMagnitudes = [Float](repeating: 0, count: n / 2)
-        var count = Int32(n / 2)
-        vvsqrtf(&sqrtMagnitudes, magnitudes, &count)
-
-        // Clean up only if we created a temporary setup
-        if cachedSetup == nil {
-            vDSP_destroy_fftsetup(fftSetup)
-        }
-
-        return sqrtMagnitudes
-    }
-
-    private func computeChroma(magnitudes: [Float], sampleRate: Double, fftSize: Int) -> [Float] {
-        var chroma = [Float](repeating: 0, count: 12)
-        let binFrequencyResolution = sampleRate / Double(fftSize)
-
-        // Map each FFT bin to a chroma bin
-        for bin in 1..<magnitudes.count {
-            let frequency = Double(bin) * binFrequencyResolution
-            guard frequency > 27.5 && frequency < 4186 else { continue } // A0 to C8
-
-            // Convert frequency to pitch class (0-11)
-            let midiNote = 12.0 * log2(frequency / 440.0) + 69.0
-            let pitchClass = Int(round(midiNote)) % 12
-            let normalizedPitchClass = pitchClass < 0 ? pitchClass + 12 : pitchClass
-
-            chroma[normalizedPitchClass] += magnitudes[bin]
-        }
-
-        return chroma
-    }
-
-    private func pearsonCorrelation(_ x: [Float], _ y: [Float]) -> Float {
-        let n = Float(x.count)
-        var sumX: Float = 0, sumY: Float = 0
-        var sumXY: Float = 0, sumX2: Float = 0, sumY2: Float = 0
-
-        for i in 0..<x.count {
-            sumX += x[i]
-            sumY += y[i]
-            sumXY += x[i] * y[i]
-            sumX2 += x[i] * x[i]
-            sumY2 += y[i] * y[i]
-        }
-
-        let numerator = n * sumXY - sumX * sumY
-        let denominator = sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY))
-
-        guard denominator > 0 else { return 0 }
-        return numerator / denominator
+        return ("C", "Major") // SILENCE or error fallback
     }
 }

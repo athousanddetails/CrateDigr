@@ -71,6 +71,7 @@ final class SamplerViewModel: ObservableObject {
     @Published var sampleFile: SampleFile?
     @Published var waveformData: [(min: Float, max: Float)] = []
     @Published var frequencyColorData: [(low: Float, mid: Float, high: Float)] = []
+    @Published var waveformLOD: WaveformLOD?
     @Published var isLoadingFile = false
     @Published var loadError: String?
 
@@ -114,6 +115,8 @@ final class SamplerViewModel: ObservableObject {
     @Published var metronomeVolume: Double = 0.8
     @Published var snapToGrid = false
     @Published var loopSnapToGrid = false
+    @Published var quantizeEnabled = true  // CDJ-style: all loop ops snap to beat grid
+    @Published var pendingLoopIn: Int?     // Waiting for Loop Out after Loop In was set
     @Published var previewVolume: Float = 1.0
     @Published var eqLow: Float = 0    // dB, -26 to +6
     @Published var eqMid: Float = 0
@@ -161,6 +164,7 @@ final class SamplerViewModel: ObservableObject {
         let waveformData: [(min: Float, max: Float)]
         let stereoWaveformData: [(leftMin: Float, leftMax: Float, rightMin: Float, rightMax: Float)]
         let frequencyColorData: [(low: Float, mid: Float, high: Float)]
+        let waveformLOD: WaveformLOD?
         let sliceMarkers: [SliceMarker]
         let loopRegion: LoopRegion?
         let loopEnabled: Bool
@@ -192,6 +196,7 @@ final class SamplerViewModel: ObservableObject {
     @Published var activePanel: SamplerToolPanel = .pitchSpeed
     @Published var waveformZoom: CGFloat = 1.0
     @Published var waveformOffset: CGFloat = 0
+
     @Published var showGrid = false
     @Published var waveformHeight: CGFloat = 180  // User-resizable waveform height
 
@@ -344,6 +349,13 @@ final class SamplerViewModel: ObservableObject {
                 guard self.loadGeneration == myGeneration else { return }
                 self.frequencyColorData = colorData
 
+                // Compute multi-resolution LOD pyramid for Metal waveform
+                let myGen = myGeneration
+                self.waveformLOD = WaveformLOD.compute(from: file) { [weak self] lod in
+                    guard let self, self.loadGeneration == myGen else { return }
+                    self.waveformLOD = lod
+                }
+
                 // Compute spectrogram data in background
                 let spectro = await Task.detached(priority: .utility) {
                     SpectrogramComputer.compute(samples: samples, sampleRate: sampleRate)
@@ -412,6 +424,23 @@ final class SamplerViewModel: ObservableObject {
         let relativePos = Double(position) - gridStart
         let nearestSixteenth = round(relativePos / samplesPerSixteenth) * samplesPerSixteenth
         return max(0, min(sf.totalSamples, Int(nearestSixteenth + gridStart)))
+    }
+
+    /// Snap a sample position to the nearest beat boundary (CDJ-style quantize)
+    func snapToNearestBeat(_ position: Int, sf: SampleFile? = nil) -> Int {
+        guard let sf = sf ?? sampleFile, let bpm = sf.bpm, bpm > 0 else { return position }
+        let effectiveBPM = Double(bpm) * speed
+        let samplesPerBeat = sf.sampleRate * 60.0 / effectiveBPM
+        let gridStart = Double(gridOffsetSamples)
+        let relativePos = Double(position) - gridStart
+        let nearestBeat = round(relativePos / samplesPerBeat) * samplesPerBeat
+        return max(0, min(sf.totalSamples, Int(nearestBeat + gridStart)))
+    }
+
+    /// Quantize-aware position: snaps to beat if quantize ON, otherwise returns position as-is
+    func quantizePosition(_ position: Int) -> Int {
+        guard quantizeEnabled else { return position }
+        return snapToNearestBeat(position)
     }
 
     func seekToSeconds(_ seconds: Double) {
@@ -863,6 +892,7 @@ final class SamplerViewModel: ObservableObject {
         }
 
         // Loop is OFF → create new loop at current playhead position
+        let loopStart = quantizePosition(currentPosition)
         switch loopMode {
         case .free:
             guard let sf = sampleFile, let bpm = sf.bpm, bpm > 0 else {
@@ -875,13 +905,76 @@ final class SamplerViewModel: ObservableObject {
                 }
                 return
             }
-            setLoopByBars(startSample: currentPosition, bars: 4)
+            setLoopByBars(startSample: loopStart, bars: 4)
         case .bars(let bars):
-            setLoopByBars(startSample: currentPosition, bars: bars)
+            setLoopByBars(startSample: loopStart, bars: bars)
         }
         loopEnabled = true
         engine.setLoop(loopRegion, enabled: loopEnabled)
 
+        if isPlaying, let region = loopRegion {
+            engine.playRegion(region, loop: true)
+        }
+    }
+
+    // MARK: - CDJ Quick Loop
+
+    /// CDJ-style quick loop: creates a beat-locked loop of N bars at current position
+    func setQuickLoop(bars: Double) {
+        let start = quantizePosition(currentPosition)
+        setLoopByBars(startSample: start, bars: bars)
+        loopEnabled = true
+        engine.setLoop(loopRegion, enabled: true)
+        if isPlaying, let region = loopRegion {
+            engine.playRegion(region, loop: true)
+        }
+    }
+
+    /// Double the current loop length (CDJ shift+button behavior)
+    func doubleLoop() {
+        guard let region = loopRegion, let sf = sampleFile, let bpm = sf.bpm, bpm > 0 else { return }
+        let newLength = region.length * 2
+        let newEnd = min(region.startSample + newLength, sf.totalSamples)
+        loopRegion = LoopRegion(startSample: region.startSample, endSample: newEnd)
+        loopEnabled = true
+        engine.setLoop(loopRegion, enabled: true)
+        if isPlaying, let r = loopRegion {
+            engine.updateLoopRegion(r)
+        }
+    }
+
+    /// Halve the current loop length (CDJ shift+button behavior)
+    func halveLoop() {
+        guard let region = loopRegion, region.length > 1000 else { return }
+        let newLength = region.length / 2
+        loopRegion = LoopRegion(startSample: region.startSample, endSample: region.startSample + newLength)
+        loopEnabled = true
+        engine.setLoop(loopRegion, enabled: true)
+        if isPlaying, let r = loopRegion {
+            // If playhead is past new end, wrap it
+            if currentPosition >= r.endSample {
+                let wrapped = r.startSample + ((currentPosition - r.startSample) % r.length)
+                engine.seamlessLoopRestart(region: r, from: wrapped)
+            } else {
+                engine.updateLoopRegion(r)
+            }
+        }
+    }
+
+    // MARK: - Loop In / Loop Out (CDJ-style)
+
+    /// Set loop-in point at current position (quantized if enabled). Waits for loopOut().
+    func loopIn() {
+        pendingLoopIn = quantizePosition(currentPosition)
+    }
+
+    /// Set loop-out point and activate loop. Requires loopIn() to have been called first.
+    func loopOut() {
+        guard let inPoint = pendingLoopIn else { return }
+        let outPoint = quantizePosition(currentPosition)
+        guard outPoint > inPoint else { return }
+        pendingLoopIn = nil
+        setLoopRegion(start: inPoint, end: outPoint)
         if isPlaying, let region = loopRegion {
             engine.playRegion(region, loop: true)
         }
@@ -1097,6 +1190,7 @@ final class SamplerViewModel: ObservableObject {
             waveformData: waveformData,
             stereoWaveformData: stereoWaveformData,
             frequencyColorData: frequencyColorData,
+            waveformLOD: waveformLOD,
             sliceMarkers: sliceMarkers,
             loopRegion: loopRegion,
             loopEnabled: loopEnabled,
@@ -1134,6 +1228,7 @@ final class SamplerViewModel: ObservableObject {
         sampleFile = focusFile
         updateWaveformData(from: focusFile)
         frequencyColorData = []
+        waveformLOD = nil
         engine.loadSample(focusFile)
         syncEngineState()
 
@@ -1151,12 +1246,15 @@ final class SamplerViewModel: ObservableObject {
         engine.playRegion(focusRegion, loop: true)
         isPlaying = true
 
-        // Background: frequency colors
+        // Background: frequency colors + LOD
         Task {
             let colorData = await Task.detached(priority: .userInitiated) {
                 focusFile.frequencyColorData(bucketCount: 4000)
             }.value
             self.frequencyColorData = colorData
+            self.waveformLOD = WaveformLOD.compute(from: focusFile) { [weak self] lod in
+                self?.waveformLOD = lod
+            }
         }
     }
 
@@ -1169,6 +1267,7 @@ final class SamplerViewModel: ObservableObject {
         waveformData = state.waveformData
         stereoWaveformData = state.stereoWaveformData
         frequencyColorData = state.frequencyColorData
+        waveformLOD = state.waveformLOD
         sliceMarkers = state.sliceMarkers
         loopRegion = state.loopRegion
         loopEnabled = state.loopEnabled
@@ -1415,6 +1514,9 @@ final class SamplerViewModel: ObservableObject {
                 newFile.frequencyColorData(bucketCount: 4000)
             }.value
             self.frequencyColorData = colorData
+            self.waveformLOD = WaveformLOD.compute(from: newFile) { [weak self] lod in
+                self?.waveformLOD = lod
+            }
         }
     }
 
@@ -1433,6 +1535,9 @@ final class SamplerViewModel: ObservableObject {
                 original.frequencyColorData(bucketCount: 4000)
             }.value
             self.frequencyColorData = colorData
+            self.waveformLOD = WaveformLOD.compute(from: original) { [weak self] lod in
+                self?.waveformLOD = lod
+            }
         }
     }
 

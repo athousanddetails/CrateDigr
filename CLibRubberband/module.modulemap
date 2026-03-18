@@ -1,0 +1,6 @@
+module CLibRubberband {
+    header "include/rubberband-c.h"
+    link "rubberband"
+    link "c++"
+    export *
+}

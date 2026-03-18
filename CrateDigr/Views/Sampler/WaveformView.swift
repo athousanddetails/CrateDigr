@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import MetalKit
 
 struct WaveformView: View {
     @EnvironmentObject var vm: SamplerViewModel
@@ -125,26 +126,23 @@ struct WaveformView: View {
                 let _ = updateViewWidth(width) // cache for auto-follow
 
                 ZStack {
-                    Color(white: 0.08)
-
-                    Canvas { context, size in
-                        drawGrid(context: context, size: size)
-                        drawLoopRegion(context: context, size: size)
-                        if vm.showStereoWaveform {
-                            drawStereoWaveform(context: context, size: size)
-                        } else if vm.showSpectrogram {
+                    if vm.showSpectrogram {
+                        Color(white: 0.08)
+                        Canvas { context, size in
                             drawSpectrogram(context: context, size: size)
-                        } else {
-                            drawWaveform(context: context, size: size)
+                            drawPlayhead(context: context, size: size)
                         }
-                        drawSliceMarkers(context: context, size: size)
-                        drawPlayhead(context: context, size: size)
+                    } else {
+                        MetalWaveformView()
+                            .environmentObject(vm)
                     }
 
-                    // Center zero line
-                    Rectangle()
-                        .fill(Color.gray.opacity(0.2))
-                        .frame(height: 0.5)
+                    // Center zero line (only for non-spectrogram)
+                    if !vm.showSpectrogram {
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.2))
+                            .frame(height: 0.5)
+                    }
                 }
                 .clipShape(Rectangle())
                 .contentShape(Rectangle())
@@ -227,7 +225,7 @@ struct WaveformView: View {
                 .stroke(Color.gray.opacity(0.3), lineWidth: 0.5)
         )
         .onAppear {
-            // 30fps refresh for playhead animation + auto-follow
+            // 30fps position sync + auto-follow (Metal handles its own 60fps rendering)
             refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { _ in
                 Task { @MainActor in
                     refreshTick += 1
@@ -286,8 +284,10 @@ struct WaveformView: View {
                                 let deltaSamples = currentSample - dragOriginSample
                                 var newStart = loopDragStartSample + deltaSamples
 
-                                // Snap to grid if enabled
-                                if vm.loopSnapToGrid {
+                                // Snap to grid/quantize
+                                if vm.quantizeEnabled {
+                                    newStart = vm.snapToNearestBeat(newStart)
+                                } else if vm.loopSnapToGrid {
                                     newStart = vm.snapSampleToGrid(newStart)
                                 }
 
@@ -350,8 +350,10 @@ struct WaveformView: View {
             DragGesture(minimumDistance: 1)
                 .onChanged { value in
                     var newSample = xToSample(value.location.x, width: width)
-                    // Snap loop handle to grid if loop snap is enabled
-                    if vm.loopSnapToGrid {
+                    // Snap loop handle: quantize → beats, loopSnap → 16ths
+                    if vm.quantizeEnabled {
+                        newSample = vm.snapToNearestBeat(newSample)
+                    } else if vm.loopSnapToGrid {
                         newSample = vm.snapSampleToGrid(newSample)
                     }
                     if isStart {
@@ -466,7 +468,6 @@ struct WaveformView: View {
 
         var barPosition = gridOffset
         var barNum = 1
-
         while barPosition < Double(sf.totalSamples) {
             let barX = sampleToX(Int(barPosition), totalSamples: sf.totalSamples, width: size.width)
 
@@ -588,375 +589,7 @@ struct WaveformView: View {
         context.stroke(line, with: .color(.gray.opacity(0.3)), lineWidth: 0.5)
     }
 
-    // MARK: - Grid Drawing
-
-    private func drawGrid(context: GraphicsContext, size: CGSize) {
-        guard let sf = vm.sampleFile, let bpm = sf.bpm, bpm > 0 else { return }
-
-        let gridOffset = Double(vm.gridOffsetSamples)
-        // Use effective BPM (adjusted for speed) so grid reflects pitch/speed changes
-        let effectiveBPM = Double(bpm) * vm.speed
-        let samplesPerBeat = sf.sampleRate * 60.0 / effectiveBPM
-        let samplesPerBar = samplesPerBeat * 4.0
-        let barPixelWidth = samplesPerBar / Double(sf.totalSamples) * Double(size.width) * Double(vm.waveformZoom)
-
-        // Grid offset indicator
-        if vm.gridOffsetSamples != 0 {
-            let offsetMs = Double(vm.gridOffsetSamples) / sf.sampleRate * 1000.0
-            let label = Text(String(format: "Grid: %+.0fms", offsetMs))
-                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                .foregroundColor(.orange)
-            context.draw(label, at: CGPoint(x: 50, y: 10))
-        }
-
-        var barPosition = gridOffset
-        while barPosition < Double(sf.totalSamples) {
-            let x = sampleToX(Int(barPosition), totalSamples: sf.totalSamples, width: size.width)
-
-            if x >= 0 && x <= size.width {
-                var barLine = Path()
-                barLine.move(to: CGPoint(x: x, y: 0))
-                barLine.addLine(to: CGPoint(x: x, y: size.height))
-                let gridColor = vm.gridOffsetSamples != 0
-                    ? Color.orange.opacity(0.25)
-                    : Color.white.opacity(0.12)
-                context.stroke(barLine, with: .color(gridColor), lineWidth: 1)
-            }
-
-            if barPixelWidth > 60 {
-                for beat in 1..<4 {
-                    let beatPos = barPosition + Double(beat) * samplesPerBeat
-                    let bx = sampleToX(Int(beatPos), totalSamples: sf.totalSamples, width: size.width)
-                    if bx >= 0 && bx <= size.width {
-                        var beatLine = Path()
-                        beatLine.move(to: CGPoint(x: bx, y: 0))
-                        beatLine.addLine(to: CGPoint(x: bx, y: size.height))
-                        let beatColor = vm.gridOffsetSamples != 0
-                            ? Color.orange.opacity(0.1)
-                            : Color.white.opacity(0.06)
-                        context.stroke(beatLine, with: .color(beatColor), lineWidth: 0.5)
-                    }
-                }
-            }
-
-            // 16th subdivision grid lines when zoomed far enough
-            let sixteenthPixelWidth = barPixelWidth / 16.0
-            if sixteenthPixelWidth > 12 {
-                for s in 0..<16 {
-                    if s % 4 == 0 { continue } // Skip beat lines already drawn
-                    let subPos = barPosition + Double(s) * samplesPerBeat / 4.0
-                    let sx = sampleToX(Int(subPos), totalSamples: sf.totalSamples, width: size.width)
-                    if sx >= 0 && sx <= size.width {
-                        var subLine = Path()
-                        subLine.move(to: CGPoint(x: sx, y: 0))
-                        subLine.addLine(to: CGPoint(x: sx, y: size.height))
-                        context.stroke(subLine, with: .color(Color.white.opacity(0.03)), lineWidth: 0.5)
-                    }
-                }
-            }
-
-            barPosition += samplesPerBar
-        }
-    }
-
-    // MARK: - Rekordbox 3-Band Waveform
-    // Blue = Low (20-200Hz), Orange/Amber = Mid (200-5000Hz), White = High (5000Hz+)
-    // Bands are drawn as layered columns — low at bottom, mid in middle, high at peaks
-
-    // Rekordbox 3-Band colors
-    private let lowColor = Color(red: 0.15, green: 0.35, blue: 0.95)   // Deep blue
-    private let midColor = Color(red: 0.95, green: 0.65, blue: 0.1)    // Amber/orange
-    private let highColor = Color(red: 0.92, green: 0.92, blue: 0.95)  // Near-white
-
-    private func drawWaveform(context: GraphicsContext, size: CGSize) {
-        let data = vm.waveformData
-        let colorData = vm.frequencyColorData
-        guard !data.isEmpty else { return }
-
-        let totalBuckets = data.count
-        let visibleStart = vm.waveformOffset / (size.width * vm.waveformZoom) * CGFloat(totalBuckets)
-        let visibleEnd = (vm.waveformOffset + size.width) / (size.width * vm.waveformZoom) * CGFloat(totalBuckets)
-        guard visibleStart < visibleEnd else { return }
-
-        let centerY = size.height / 2
-        let pixelCount = Int(size.width)
-        let hasColorData = !colorData.isEmpty && colorData.count == data.count
-        let scale: CGFloat = 0.9
-
-        if !hasColorData {
-            // Fallback: single-color waveform
-            drawFallbackWaveform(context: context, size: size, data: data, visibleStart: visibleStart, visibleEnd: visibleEnd)
-            return
-        }
-
-        // Rekordbox 3-Band layered drawing: draw each band as its own filled shape
-        // Order: Low (back/blue) → Mid (amber) → High (front/white)
-        // Each band is drawn symmetrically from centerY
-
-        // 1. Draw LOW band (blue) — typically largest for kicks/bass
-        drawBandFill(context: context, pixelCount: pixelCount, centerY: centerY, scale: scale,
-                     visibleStart: visibleStart, visibleEnd: visibleEnd, totalBuckets: totalBuckets,
-                     colorData: colorData, bandKeyPath: \.low, color: lowColor, opacity: 0.85)
-
-        // 2. Draw MID band (amber) — vocals, snares, synths
-        drawBandFill(context: context, pixelCount: pixelCount, centerY: centerY, scale: scale,
-                     visibleStart: visibleStart, visibleEnd: visibleEnd, totalBuckets: totalBuckets,
-                     colorData: colorData, bandKeyPath: \.mid, color: midColor, opacity: 0.8)
-
-        // 3. Draw HIGH band (white) — hats, cymbals, air
-        drawBandFill(context: context, pixelCount: pixelCount, centerY: centerY, scale: scale,
-                     visibleStart: visibleStart, visibleEnd: visibleEnd, totalBuckets: totalBuckets,
-                     colorData: colorData, bandKeyPath: \.high, color: highColor, opacity: 0.75)
-
-        // 4. Draw overall outline for definition
-        drawWaveformOutline(context: context, size: size, data: data,
-                           visibleStart: visibleStart, visibleEnd: visibleEnd)
-    }
-
-    // MARK: - Stereo L/R Waveform
-
-    private func drawStereoWaveform(context: GraphicsContext, size: CGSize) {
-        let data = vm.stereoWaveformData
-        guard !data.isEmpty else { return }
-
-        let colorData = vm.frequencyColorData
-        let totalBuckets = data.count
-        let visibleStart = vm.waveformOffset / (size.width * vm.waveformZoom) * CGFloat(totalBuckets)
-        let visibleEnd = (vm.waveformOffset + size.width) / (size.width * vm.waveformZoom) * CGFloat(totalBuckets)
-        guard visibleStart < visibleEnd else { return }
-
-        let halfH = size.height / 2
-        let lCenter = halfH * 0.5          // Center of top (L) half
-        let rCenter = halfH + halfH * 0.5  // Center of bottom (R) half
-        let scale: CGFloat = 0.9
-        let pixelCount = Int(size.width)
-        let hasColorData = !colorData.isEmpty && colorData.count == data.count
-
-        if hasColorData {
-            // 3-band Rekordbox-style coloring for each channel
-            // Use frequency band ratios from mono data, scaled by per-channel amplitude
-            for (centerY, useLeft) in [(lCenter, true), (rCenter, false)] {
-                for (bandKP, bandColor, opacity) in [
-                    (\(low: Float, mid: Float, high: Float).low, lowColor, 0.85),
-                    (\(low: Float, mid: Float, high: Float).mid, midColor, 0.8),
-                    (\(low: Float, mid: Float, high: Float).high, highColor, 0.75)
-                ] as [(KeyPath<(low: Float, mid: Float, high: Float), Float>, Color, Double)] {
-                    var path = Path()
-                    path.move(to: CGPoint(x: 0, y: centerY))
-                    for x in 0..<pixelCount {
-                        let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
-                        let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
-                        let amp = CGFloat(colorData[idx][keyPath: bandKP])
-                        path.addLine(to: CGPoint(x: CGFloat(x), y: centerY - amp * halfH * 0.5 * scale))
-                    }
-                    for x in stride(from: pixelCount - 1, through: 0, by: -1) {
-                        let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
-                        let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
-                        let amp = CGFloat(colorData[idx][keyPath: bandKP])
-                        path.addLine(to: CGPoint(x: CGFloat(x), y: centerY + amp * halfH * 0.5 * scale))
-                    }
-                    path.closeSubpath()
-                    context.fill(path, with: .color(bandColor.opacity(opacity)))
-                }
-
-                // Outline for each channel (using stereo amplitude data)
-                var outline = Path()
-                for x in 0..<pixelCount {
-                    let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
-                    let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
-                    let maxVal = useLeft ? data[idx].leftMax : data[idx].rightMax
-                    let y = centerY - CGFloat(maxVal) * halfH * 0.5 * scale
-                    if x == 0 { outline.move(to: CGPoint(x: 0, y: y)) }
-                    else { outline.addLine(to: CGPoint(x: CGFloat(x), y: y)) }
-                }
-                context.stroke(outline, with: .color(Color.white.opacity(0.25)), lineWidth: 0.5)
-            }
-        } else {
-            // Fallback: single color for each channel
-            let waveColor = Color(red: 0.2, green: 0.6, blue: 0.85)
-            let ampScale = halfH * 0.45
-
-            for (centerY, useLeft) in [(lCenter, true), (rCenter, false)] {
-                var path = Path()
-                path.move(to: CGPoint(x: 0, y: centerY))
-                for x in 0..<pixelCount {
-                    let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
-                    let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
-                    let maxVal = useLeft ? data[idx].leftMax : data[idx].rightMax
-                    path.addLine(to: CGPoint(x: CGFloat(x), y: centerY - CGFloat(maxVal) * ampScale))
-                }
-                for x in stride(from: pixelCount - 1, through: 0, by: -1) {
-                    let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
-                    let idx = max(0, min(totalBuckets - 1, Int(bucketF)))
-                    let minVal = useLeft ? data[idx].leftMin : data[idx].rightMin
-                    path.addLine(to: CGPoint(x: CGFloat(x), y: centerY - CGFloat(minVal) * ampScale))
-                }
-                path.closeSubpath()
-                context.fill(path, with: .color(waveColor.opacity(0.55)))
-            }
-        }
-
-        // Center divider
-        var divider = Path()
-        divider.move(to: CGPoint(x: 0, y: halfH))
-        divider.addLine(to: CGPoint(x: size.width, y: halfH))
-        context.stroke(divider, with: .color(.gray.opacity(0.5)), lineWidth: 0.5)
-
-        // Subtle L/R labels
-        context.draw(Text("L").font(.system(size: 9, weight: .semibold)).foregroundColor(.white.opacity(0.35)),
-                     at: CGPoint(x: 12, y: 12))
-        context.draw(Text("R").font(.system(size: 9, weight: .semibold)).foregroundColor(.white.opacity(0.35)),
-                     at: CGPoint(x: 12, y: halfH + 12))
-    }
-
-    private func drawBandFill(context: GraphicsContext, pixelCount: Int, centerY: CGFloat, scale: CGFloat,
-                              visibleStart: CGFloat, visibleEnd: CGFloat, totalBuckets: Int,
-                              colorData: [(low: Float, mid: Float, high: Float)],
-                              bandKeyPath: KeyPath<(low: Float, mid: Float, high: Float), Float>,
-                              color: Color, opacity: Double) {
-        // Build a filled path: top half from left to right, then bottom half right to left
-        var topPath = Path()
-        topPath.move(to: CGPoint(x: 0, y: centerY))
-
-        for x in 0..<pixelCount {
-            let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
-            let bucketIdx = max(0, min(totalBuckets - 1, Int(bucketF)))
-            let amp = CGFloat(colorData[bucketIdx][keyPath: bandKeyPath])
-            let y = centerY - amp * centerY * scale
-            topPath.addLine(to: CGPoint(x: CGFloat(x), y: y))
-        }
-
-        // Return along the bottom (mirrored)
-        for x in stride(from: pixelCount - 1, through: 0, by: -1) {
-            let bucketF = visibleStart + CGFloat(x) / CGFloat(pixelCount) * (visibleEnd - visibleStart)
-            let bucketIdx = max(0, min(totalBuckets - 1, Int(bucketF)))
-            let amp = CGFloat(colorData[bucketIdx][keyPath: bandKeyPath])
-            let y = centerY + amp * centerY * scale
-            topPath.addLine(to: CGPoint(x: CGFloat(x), y: y))
-        }
-
-        topPath.closeSubpath()
-        context.fill(topPath, with: .color(color.opacity(opacity)))
-    }
-
-    private func drawWaveformOutline(context: GraphicsContext, size: CGSize, data: [(min: Float, max: Float)],
-                                     visibleStart: CGFloat, visibleEnd: CGFloat) {
-        let totalBuckets = data.count
-        let centerY = size.height / 2
-        let pixelCount = Int(size.width)
-
-        // Top edge outline
-        var outlinePath = Path()
-        for x in 0..<pixelCount {
-            let bucketF = visibleStart + CGFloat(x) / size.width * (visibleEnd - visibleStart)
-            let bucketIdx = max(0, min(totalBuckets - 1, Int(bucketF)))
-            let topY = centerY - CGFloat(data[bucketIdx].max) * centerY * 0.9
-            if x == 0 { outlinePath.move(to: CGPoint(x: 0, y: topY)) }
-            else { outlinePath.addLine(to: CGPoint(x: CGFloat(x), y: topY)) }
-        }
-        context.stroke(outlinePath, with: .color(Color.white.opacity(0.25)), lineWidth: 0.5)
-
-        // Bottom edge outline
-        var outlineNeg = Path()
-        for x in 0..<pixelCount {
-            let bucketF = visibleStart + CGFloat(x) / size.width * (visibleEnd - visibleStart)
-            let bucketIdx = max(0, min(totalBuckets - 1, Int(bucketF)))
-            let botY = centerY - CGFloat(data[bucketIdx].min) * centerY * 0.9
-            if x == 0 { outlineNeg.move(to: CGPoint(x: 0, y: botY)) }
-            else { outlineNeg.addLine(to: CGPoint(x: CGFloat(x), y: botY)) }
-        }
-        context.stroke(outlineNeg, with: .color(Color.white.opacity(0.18)), lineWidth: 0.5)
-    }
-
-    private func drawFallbackWaveform(context: GraphicsContext, size: CGSize, data: [(min: Float, max: Float)],
-                                      visibleStart: CGFloat, visibleEnd: CGFloat) {
-        let totalBuckets = data.count
-        let centerY = size.height / 2
-        let pixelCount = Int(size.width)
-
-        var fillPath = Path()
-        fillPath.move(to: CGPoint(x: 0, y: centerY))
-        for x in 0..<pixelCount {
-            let bucketF = visibleStart + CGFloat(x) / size.width * (visibleEnd - visibleStart)
-            let bucketIdx = max(0, min(totalBuckets - 1, Int(bucketF)))
-            let topY = centerY - CGFloat(data[bucketIdx].max) * centerY * 0.9
-            fillPath.addLine(to: CGPoint(x: CGFloat(x), y: topY))
-        }
-        for x in stride(from: pixelCount - 1, through: 0, by: -1) {
-            let bucketF = visibleStart + CGFloat(x) / size.width * (visibleEnd - visibleStart)
-            let bucketIdx = max(0, min(totalBuckets - 1, Int(bucketF)))
-            let botY = centerY - CGFloat(data[bucketIdx].min) * centerY * 0.9
-            fillPath.addLine(to: CGPoint(x: CGFloat(x), y: botY))
-        }
-        fillPath.closeSubpath()
-        context.fill(fillPath, with: .color(Color(red: 0.2, green: 0.6, blue: 0.85).opacity(0.55)))
-    }
-
-    // MARK: - Loop Region
-
-    private func drawLoopRegion(context: GraphicsContext, size: CGSize) {
-        guard vm.loopEnabled, let region = vm.loopRegion, let sf = vm.sampleFile else { return }
-
-        let startX = sampleToX(region.startSample, totalSamples: sf.totalSamples, width: size.width)
-        let endX = sampleToX(region.endSample, totalSamples: sf.totalSamples, width: size.width)
-
-        if startX > 0 {
-            context.fill(Path(CGRect(x: 0, y: 0, width: startX, height: size.height)), with: .color(.black.opacity(0.4)))
-        }
-        if endX < size.width {
-            context.fill(Path(CGRect(x: endX, y: 0, width: size.width - endX, height: size.height)), with: .color(.black.opacity(0.4)))
-        }
-
-        context.fill(Path(CGRect(x: startX, y: 0, width: endX - startX, height: size.height)), with: .color(Color.green.opacity(0.06)))
-
-        var sl = Path(); sl.move(to: CGPoint(x: startX, y: 0)); sl.addLine(to: CGPoint(x: startX, y: size.height))
-        context.stroke(sl, with: .color(.green.opacity(0.9)), lineWidth: 2)
-
-        var el = Path(); el.move(to: CGPoint(x: endX, y: 0)); el.addLine(to: CGPoint(x: endX, y: size.height))
-        context.stroke(el, with: .color(.green.opacity(0.9)), lineWidth: 2)
-
-        context.fill(Path(CGRect(x: startX, y: 0, width: endX - startX, height: 3)), with: .color(.green.opacity(0.8)))
-    }
-
-    // MARK: - Slice Markers
-
-    private func drawSliceMarkers(context: GraphicsContext, size: CGSize) {
-        guard let sf = vm.sampleFile else { return }
-
-        for marker in vm.sliceMarkers {
-            let x = sampleToX(marker.samplePosition, totalSamples: sf.totalSamples, width: size.width)
-            guard x >= -2 && x <= size.width + 2 else { continue }
-
-            let color: Color = {
-                switch marker.type {
-                case .transient: return .orange
-                case .manual: return .green
-                case .grid: return .yellow
-                }
-            }()
-
-            var line = Path()
-            line.move(to: CGPoint(x: x, y: 0))
-            line.addLine(to: CGPoint(x: x, y: size.height))
-            context.stroke(line, with: .color(color.opacity(0.8)), lineWidth: 1)
-
-            var tri = Path()
-            tri.move(to: CGPoint(x: x - 4, y: 0))
-            tri.addLine(to: CGPoint(x: x + 4, y: 0))
-            tri.addLine(to: CGPoint(x: x, y: 7))
-            tri.closeSubpath()
-            context.fill(tri, with: .color(color))
-
-            if let pad = marker.padIndex {
-                let text = Text("\(pad + 1)")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(color)
-                context.draw(text, at: CGPoint(x: x, y: 16))
-            }
-        }
-    }
-
-    // MARK: - Playhead
+    // MARK: - Spectrogram Playhead (Canvas fallback)
 
     private func drawPlayhead(context: GraphicsContext, size: CGSize) {
         guard let sf = vm.sampleFile else { return }
@@ -997,7 +630,6 @@ struct WaveformView: View {
         if currentViewWidth != w {
             DispatchQueue.main.async { currentViewWidth = w }
         }
-        vm.lastKnownViewWidth = w
         return true
     }
 
@@ -1026,8 +658,11 @@ struct WaveformView: View {
 
     private func drawSpectrogram(context: GraphicsContext, size: CGSize) {
         guard let data = vm.spectrogramData, data.timeSliceCount > 0 else {
-            // Fallback: show regular waveform if spectrogram not yet computed
-            drawWaveform(context: context, size: size)
+            // Spectrogram not yet computed — show "computing" text
+            let label = Text("Computing spectrogram...")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.gray)
+            context.draw(label, at: CGPoint(x: size.width / 2, y: size.height / 2))
             return
         }
 

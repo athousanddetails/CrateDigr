@@ -142,25 +142,31 @@ struct SampleFile: Identifiable {
         var result: [(low: Float, mid: Float, high: Float)] = []
         result.reserveCapacity(bucketCount)
 
-        for i in 0..<bucketCount {
-            let start = i * samplesPerBucket
-            let end = min(start + samplesPerBucket, n)
-            guard start < end else {
-                result.append((0, 0, 0))
-                continue
+        lowBand.withUnsafeBufferPointer { lowPtr in
+            midBand.withUnsafeBufferPointer { midPtr in
+                highBand.withUnsafeBufferPointer { highPtr in
+                    let lowBase = lowPtr.baseAddress!
+                    let midBase = midPtr.baseAddress!
+                    let highBase = highPtr.baseAddress!
+
+                    for i in 0..<bucketCount {
+                        let start = i * samplesPerBucket
+                        let end = min(start + samplesPerBucket, n)
+                        let count = end - start
+                        guard count > 0 else {
+                            result.append((0, 0, 0))
+                            continue
+                        }
+                        var lowPeak: Float = 0
+                        var midPeak: Float = 0
+                        var highPeak: Float = 0
+                        vDSP_maxmgv(lowBase + start, 1, &lowPeak, vDSP_Length(count))
+                        vDSP_maxmgv(midBase + start, 1, &midPeak, vDSP_Length(count))
+                        vDSP_maxmgv(highBase + start, 1, &highPeak, vDSP_Length(count))
+                        result.append((low: lowPeak, mid: midPeak, high: highPeak))
+                    }
+                }
             }
-
-            var lowPeak: Float = 0
-            var midPeak: Float = 0
-            var highPeak: Float = 0
-
-            for j in start..<end {
-                lowPeak = max(lowPeak, abs(lowBand[j]))
-                midPeak = max(midPeak, abs(midBand[j]))
-                highPeak = max(highPeak, abs(highBand[j]))
-            }
-
-            result.append((low: lowPeak, mid: midPeak, high: highPeak))
         }
         return result
     }

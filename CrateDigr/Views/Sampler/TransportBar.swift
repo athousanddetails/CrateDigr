@@ -3,6 +3,20 @@ import SwiftUI
 struct TransportBar: View {
     @EnvironmentObject var vm: SamplerViewModel
 
+    private let quickLoopSizes: [(label: String, bars: Double)] = [
+        ("1/32", 1.0/32), ("1/16", 1.0/16), ("1/8", 0.125), ("1/4", 0.25),
+        ("1/2", 0.5), ("1", 1), ("2", 2), ("4", 4), ("8", 8), ("16", 16)
+    ]
+
+    /// Check if current loop matches a given bar size (for highlighting active button)
+    private func isActiveLoop(bars: Double) -> Bool {
+        guard vm.loopEnabled, let region = vm.loopRegion,
+              let sf = vm.sampleFile, let bpm = sf.bpm, bpm > 0 else { return false }
+        let samplesPerBeat = sf.sampleRate * 60.0 / Double(bpm)
+        let expectedLength = Int(bars * 4.0 * samplesPerBeat)
+        return abs(region.length - expectedLength) < Int(samplesPerBeat * 0.1) // 10% tolerance
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             // Play/Stop
@@ -30,6 +44,16 @@ struct TransportBar: View {
 
             Divider().frame(height: 20)
 
+            // Quantize toggle
+            Button(action: { vm.quantizeEnabled.toggle() }) {
+                Image(systemName: "arrow.down.to.line.compact")
+                    .font(.system(size: 13))
+                    .foregroundStyle(vm.quantizeEnabled ? .orange : .secondary)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("q", modifiers: [.command, .shift])
+            .help(vm.quantizeEnabled ? "Quantize ON — loops snap to beats (⇧⌘Q)" : "Quantize OFF — free positioning (⇧⌘Q)")
+
             // Loop controls
             HStack(spacing: 4) {
                 Button(action: { vm.toggleLoop() }) {
@@ -55,6 +79,64 @@ struct TransportBar: View {
                 .help("Loop length — Free or snap to bar count")
                 .onChange(of: vm.loopMode) { _, _ in
                     vm.applyLoopMode()
+                }
+
+                // CDJ Loop In / Out
+                Button(action: { vm.loopIn() }) {
+                    Text("IN")
+                        .font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(vm.pendingLoopIn != nil ? Color.green.opacity(0.3) : Color.gray.opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
+                .buttonStyle(.plain)
+                .help("Set loop-in point at playhead")
+
+                Button(action: { vm.loopOut() }) {
+                    Text("OUT")
+                        .font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(Color.gray.opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
+                .buttonStyle(.plain)
+                .disabled(vm.pendingLoopIn == nil)
+                .help("Set loop-out point and activate loop")
+
+                // Halve / Double
+                if vm.loopEnabled {
+                    Button(action: { vm.halveLoop() }) {
+                        Text("/2")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Halve loop length")
+
+                    Button(action: { vm.doubleLoop() }) {
+                        Text("×2")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Double loop length")
+                }
+            }
+
+            // CDJ Quick Loop Buttons
+            if vm.sampleFile?.bpm != nil {
+                HStack(spacing: 1) {
+                    ForEach(quickLoopSizes, id: \.label) { size in
+                        Button(action: { vm.setQuickLoop(bars: size.bars) }) {
+                            Text(size.label)
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                .frame(width: 22, height: 16)
+                                .background(isActiveLoop(bars: size.bars) ? Color.green.opacity(0.3) : Color.gray.opacity(0.1))
+                                .clipShape(RoundedRectangle(cornerRadius: 2))
+                        }
+                        .buttonStyle(.plain)
+                        .help("\(size.label) bar loop")
+                    }
                 }
             }
 

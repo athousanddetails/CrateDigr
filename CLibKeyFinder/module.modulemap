@@ -1,0 +1,7 @@
+module CLibKeyFinder {
+    header "include/keyfinder_wrapper.h"
+    link "keyfinder"
+    link "fftw3"
+    link "c++"
+    export *
+}

@@ -1,10 +1,87 @@
 import Foundation
+import AVFoundation
 
 final class TimeStretchService {
     private let ffmpegURL: URL
+    private let rubberbandProcessor = RubberbandProcessor()
 
     init(ffmpegURL: URL = BundledBinaryManager.ffmpegURL) {
         self.ffmpegURL = ffmpegURL
+    }
+
+    /// Native Rubberband stretch+pitch for non-turntable modes.
+    /// Processes the audio in-memory using our linked Rubberband library.
+    /// Falls back to ffmpeg if Rubberband fails.
+    func nativeRubberbandExport(
+        inputPath: URL,
+        outputPath: URL,
+        speedRatio: Double,
+        pitchSemitones: Double = 0,
+        sampleRate: Int = 48000,
+        mode: PitchSpeedMode = .independent,
+        eqFilter: String? = nil
+    ) async throws {
+        // Read input file
+        let audioFile = try AVAudioFile(forReading: inputPath)
+        let format = audioFile.processingFormat
+        let frameCount = AVAudioFrameCount(audioFile.length)
+
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            throw TimeStretchError.failed("Cannot create buffer")
+        }
+        try audioFile.read(into: buffer)
+
+        // Process through Rubberband
+        let pitchCents = Float(pitchSemitones * 100.0)
+        if let processed = rubberbandProcessor.processBuffer(buffer, rate: Float(speedRatio), pitchCents: pitchCents, mode: mode) {
+            // Write intermediate temp file
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rb_\(UUID().uuidString).wav")
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            let outFile = try AVAudioFile(forWriting: tempURL, settings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: format.sampleRate,
+                AVNumberOfChannelsKey: format.channelCount,
+                AVLinearPCMBitDepthKey: 32,
+                AVLinearPCMIsFloatKey: true
+            ])
+            try outFile.write(from: processed)
+
+            // Use ffmpeg for final format conversion + optional EQ
+            var arguments = [
+                "-i", tempURL.path,
+                "-vn", "-y",
+                "-loglevel", "error",
+                "-ar", String(sampleRate)
+            ]
+            if let eq = eqFilter {
+                arguments += ["-af", eq]
+            }
+            arguments.append(outputPath.path)
+
+            let output = try await ProcessRunner.run(executableURL: ffmpegURL, arguments: arguments)
+            guard output.exitCode == 0 else {
+                throw TimeStretchError.failed(output.stderr)
+            }
+        } else {
+            // Rubberband returned nil (no processing needed or turntable mode) — just convert
+            var arguments = [
+                "-i", inputPath.path,
+                "-vn", "-y",
+                "-loglevel", "error",
+                "-ar", String(sampleRate)
+            ]
+            if let eq = eqFilter {
+                arguments += ["-af", eq]
+            }
+            arguments.append(outputPath.path)
+
+            let output = try await ProcessRunner.run(executableURL: ffmpegURL, arguments: arguments)
+            guard output.exitCode == 0 else {
+                throw TimeStretchError.failed(output.stderr)
+            }
+        }
     }
 
     /// Apply turntable-style speed change (coupled pitch+speed) and export
@@ -46,7 +123,8 @@ final class TimeStretchService {
     }
 
     /// Apply independent speed change (pitch preserved) and export.
-    /// The `mode` parameter controls the stretch algorithm quality.
+    /// Uses native Rubberband library for ALL non-turntable modes (beats, complex, texture, independent).
+    /// This gives pro-quality results matching Mixxx/Rekordbox.
     func independentExport(
         inputPath: URL,
         outputPath: URL,
@@ -56,132 +134,27 @@ final class TimeStretchService {
         eqFilter: String? = nil,
         mode: PitchSpeedMode = .independent
     ) async throws {
-        var filters: [String] = []
-
-        // Use rubberband for high-quality modes if available, fallback to atempo
-        if speedRatio != 1.0 {
-            switch mode {
-            case .beats:
-                // rubberband with transient-preserving settings
-                // --transients=crisp --detector=compound --window-short
-                let rbFilter = "rubberband=tempo=\(String(format: "%.6f", 1.0/speedRatio)):transients=crisp:detector=compound:window=short"
-                filters.append(rbFilter)
-            case .complex:
-                // rubberband with high-quality settings
-                // --window-long for better frequency resolution
-                let rbFilter = "rubberband=tempo=\(String(format: "%.6f", 1.0/speedRatio)):transients=mixed:detector=compound:window=long"
-                filters.append(rbFilter)
-            case .texture:
-                // rubberband with smooth/texture settings
-                // --transients=smooth for pad-like material
-                let rbFilter = "rubberband=tempo=\(String(format: "%.6f", 1.0/speedRatio)):transients=smooth:detector=soft:window=long"
-                filters.append(rbFilter)
-            default:
-                // Standard atempo for independent/turntable modes
-                var remaining = speedRatio
-                while remaining > 2.0 {
-                    filters.append("atempo=2.0")
-                    remaining /= 2.0
-                }
-                while remaining < 0.5 {
-                    filters.append("atempo=0.5")
-                    remaining /= 0.5
-                }
-                filters.append("atempo=\(String(format: "%.6f", remaining))")
-            }
-        }
-
-        // Pitch shift via asetrate + aresample
-        if pitchSemitones != 0 {
-            switch mode {
-            case .beats, .complex, .texture:
-                // Use rubberband for pitch shifting too
-                let rbPitch = "rubberband=pitch=\(String(format: "%.6f", pow(2.0, pitchSemitones / 12.0)))"
-                // If we already have a rubberband filter for tempo, combine; otherwise add
-                if !filters.isEmpty && filters.last?.hasPrefix("rubberband=") == true {
-                    // Append pitch to existing rubberband filter
-                    filters[filters.count - 1] += ":pitch=\(String(format: "%.6f", pow(2.0, pitchSemitones / 12.0)))"
-                } else {
-                    filters.append(rbPitch)
-                }
-            default:
-                let pitchRatio = pow(2.0, pitchSemitones / 12.0)
-                let newRate = Int(Double(sampleRate) * pitchRatio)
-                filters.append("asetrate=\(newRate)")
-                filters.append("aresample=\(sampleRate)")
-            }
-        }
-
-        // EQ filters
-        if let eq = eqFilter {
-            filters.append(eq)
-        }
-
-        var arguments = [
-            "-i", inputPath.path,
-            "-vn", "-y",
-            "-loglevel", "error",
-            "-ar", String(sampleRate)
-        ]
-
-        if !filters.isEmpty {
-            arguments += ["-af", filters.joined(separator: ",")]
-        }
-
-        arguments.append(outputPath.path)
-
-        let output = try await ProcessRunner.run(executableURL: ffmpegURL, arguments: arguments)
-
-        // If rubberband filter failed (not compiled in), fallback to atempo
-        if output.exitCode != 0 {
-            let stderr = output.stderr.lowercased()
-            if stderr.contains("rubberband") || stderr.contains("no such filter") {
-                // Fallback: re-export with standard atempo
-                try await independentExportFallback(
+        // Use native Rubberband for all non-turntable modes
+        if speedRatio != 1.0 || pitchSemitones != 0 {
+            do {
+                try await nativeRubberbandExport(
                     inputPath: inputPath,
                     outputPath: outputPath,
                     speedRatio: speedRatio,
                     pitchSemitones: pitchSemitones,
                     sampleRate: sampleRate,
+                    mode: mode,
                     eqFilter: eqFilter
                 )
-            } else {
-                throw TimeStretchError.failed(output.stderr)
+                return
+            } catch {
+                // Fallback to ffmpeg if native Rubberband fails
+                print("Native Rubberband failed, falling back to ffmpeg: \(error)")
             }
         }
-    }
 
-    /// Fallback export using standard atempo when rubberband is not available
-    private func independentExportFallback(
-        inputPath: URL,
-        outputPath: URL,
-        speedRatio: Double,
-        pitchSemitones: Double,
-        sampleRate: Int,
-        eqFilter: String?
-    ) async throws {
+        // Fallback / no changes needed: just convert format + optional EQ
         var filters: [String] = []
-
-        if speedRatio != 1.0 {
-            var remaining = speedRatio
-            while remaining > 2.0 {
-                filters.append("atempo=2.0")
-                remaining /= 2.0
-            }
-            while remaining < 0.5 {
-                filters.append("atempo=0.5")
-                remaining /= 0.5
-            }
-            filters.append("atempo=\(String(format: "%.6f", remaining))")
-        }
-
-        if pitchSemitones != 0 {
-            let pitchRatio = pow(2.0, pitchSemitones / 12.0)
-            let newRate = Int(Double(sampleRate) * pitchRatio)
-            filters.append("asetrate=\(newRate)")
-            filters.append("aresample=\(sampleRate)")
-        }
-
         if let eq = eqFilter {
             filters.append(eq)
         }
