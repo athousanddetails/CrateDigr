@@ -80,21 +80,26 @@ final class DemucsService {
 
         NSLog("[DemucsService] Running: \(binaryURL.lastPathComponent) with \(numThreads) threads")
 
+        let outputLock = NSLock()
         var allOutput: [String] = []
 
         let exitCode = try await ProcessRunner.runStreamingBoth(
             executableURL: binaryURL,
             arguments: arguments,
             onStdoutLine: { line in
+                outputLock.lock()
                 allOutput.append(line)
-                NSLog("[DemucsService stdout] \(line)")
+                outputLock.unlock()
+                NSLog("[DemucsService stdout] %@", line)
                 if let progress = self.parseProgress(line) {
                     onProgress(progress, "Separating stems...")
                 }
             },
             onStderrLine: { line in
+                outputLock.lock()
                 allOutput.append(line)
-                NSLog("[DemucsService stderr] \(line)")
+                outputLock.unlock()
+                NSLog("[DemucsService stderr] %@", line)
                 if let progress = self.parseProgress(line) {
                     onProgress(progress, "Separating stems...")
                 }
@@ -104,7 +109,9 @@ final class DemucsService {
         NSLog("[DemucsService] Exit code: \(exitCode)")
 
         guard exitCode == 0 else {
+            outputLock.lock()
             let errorOutput = allOutput.suffix(20).joined(separator: "\n")
+            outputLock.unlock()
             throw DemucsError.separationFailed(errorOutput)
         }
 

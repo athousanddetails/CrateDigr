@@ -9,8 +9,7 @@ extension Notification.Name {
 @MainActor
 final class StemsViewModel: ObservableObject {
     // MARK: - File Browser
-    @Published var browserFolder: URL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Music")
+    @Published var browserFolder: URL = AppConstants.defaultOutputFolder
     @Published var audioFiles: [URL] = []
     @Published var selectedBrowserFile: URL?
 
@@ -26,7 +25,7 @@ final class StemsViewModel: ObservableObject {
 
     // MARK: - Stem Tracks
     @Published var stems: [StemTrack] = []
-    @Published var selectedStemID: UUID?
+    @Published var selectedStemIDs: Set<UUID> = []
 
     // MARK: - Playback
     @Published var isPlaying = false
@@ -36,10 +35,23 @@ final class StemsViewModel: ObservableObject {
     private let demucsService = DemucsService()
     let stemEngine = StemPlaybackEngine()
     private var separationTask: Task<Void, Never>?
+    private var mixTask: Task<Void, Never>?
 
     private static let audioExtensions: Set<String> = [
         "wav", "mp3", "aiff", "aif", "flac", "m4a", "ogg", "webm", "opus", "wma"
     ]
+
+    // Keep backward compat — single selected stem ID for legacy callers
+    var selectedStemID: UUID? {
+        get { selectedStemIDs.first }
+        set {
+            if let id = newValue {
+                selectedStemIDs = [id]
+            } else {
+                selectedStemIDs = []
+            }
+        }
+    }
 
     init() {
         stemEngine.onPositionUpdate = { [weak self] progress in
@@ -96,10 +108,111 @@ final class StemsViewModel: ObservableObject {
         sourceFilename = url.deletingPathExtension().lastPathComponent
         stems = []
         currentJob = nil
-        selectedStemID = nil
+        selectedStemIDs = []
         stemEngine.stop()
         isPlaying = false
         playbackProgress = 0
+    }
+
+    // MARK: - Multi-Stem Selection
+
+    func toggleStemSelection(_ id: UUID) {
+        if selectedStemIDs.contains(id) {
+            // Don't deselect if it's the only one
+            if selectedStemIDs.count > 1 {
+                selectedStemIDs.remove(id)
+            }
+        } else {
+            selectedStemIDs.insert(id)
+        }
+    }
+
+    /// Mix selected stems into a single temp WAV and load into the sampler
+    func loadSelectedStemsIntoSampler(samplerVM: SamplerViewModel) {
+        let selected = stems.filter { selectedStemIDs.contains($0.id) }
+        guard !selected.isEmpty else { return }
+
+        // Single stem — just load directly, no mixing needed
+        if selected.count == 1 {
+            samplerVM.loadFile(selected[0].fileURL)
+            return
+        }
+
+        // Multiple stems — mix their audio into a temp file
+        mixTask?.cancel()
+        mixTask = Task {
+            do {
+                let mixedURL = try await mixStemsToTempFile(selected)
+                guard !Task.isCancelled else { return }
+                samplerVM.loadFile(mixedURL)
+            } catch {
+                NSLog("[StemsVM] Failed to mix stems: \(error)")
+            }
+        }
+    }
+
+    /// Sum multiple stem WAV files into a single temp WAV
+    private func mixStemsToTempFile(_ stems: [StemTrack]) async throws -> URL {
+        // Read all stem sample data
+        var allSamples: [[Float]] = []
+        var maxLength = 0
+        var sampleRate: Double = 44100
+        var channels = 1
+
+        for stem in stems {
+            let sf = stem.sampleFile
+            // Use left/right channels for stereo preservation
+            if sf.channelCount >= 2 {
+                channels = 2
+            }
+            sampleRate = sf.sampleRate
+            allSamples.append(sf.samples)  // mono mixdown
+            maxLength = max(maxLength, sf.samples.count)
+        }
+
+        // Sum all stems (simple additive mix)
+        var mixed = [Float](repeating: 0, count: maxLength)
+        for samples in allSamples {
+            for i in 0..<samples.count {
+                mixed[i] += samples[i]
+            }
+        }
+
+        // Normalize to prevent clipping — find peak and scale if > 1.0
+        let peak = mixed.map { abs($0) }.max() ?? 1.0
+        if peak > 1.0 {
+            let scale = 0.95 / peak
+            for i in 0..<mixed.count {
+                mixed[i] *= scale
+            }
+        }
+
+        // Write to temp WAV file
+        let tempDir = AppConstants.tempBaseDirectory.appendingPathComponent("stem_mix")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        let stemNames = stems.map { $0.stemType.rawValue }.joined(separator: "+")
+        let outputURL = tempDir.appendingPathComponent("mix_\(stemNames).wav")
+
+        // Remove old file if exists
+        try? FileManager.default.removeItem(at: outputURL)
+
+        // Create AVAudioFile and write
+        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+        let audioFile = try AVAudioFile(forWriting: outputURL, settings: format.settings)
+
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(mixed.count))!
+        buffer.frameLength = AVAudioFrameCount(mixed.count)
+
+        // Copy mixed samples into buffer
+        let channelData = buffer.floatChannelData![0]
+        for i in 0..<mixed.count {
+            channelData[i] = mixed[i]
+        }
+
+        try audioFile.write(from: buffer)
+
+        return outputURL
     }
 
     // MARK: - Separation
@@ -328,7 +441,7 @@ final class StemsViewModel: ObservableObject {
         currentJob = nil
         sourceFileURL = nil
         sourceFilename = ""
-        selectedStemID = nil
+        selectedStemIDs = []
         separationProgress = 0
         statusMessage = ""
     }

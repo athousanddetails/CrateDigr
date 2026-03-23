@@ -45,27 +45,32 @@ private final class LineBuffer: @unchecked Sendable {
     private var buffer = ""
 
     func append(_ str: String, lineHandler: (String) -> Void) {
+        // Collect all complete lines while holding the lock,
+        // then call handlers AFTER releasing to prevent re-entrant corruption
+        var lines: [String] = []
+
         lock.lock()
         buffer += str
         // Parse complete lines (newline-delimited)
         while let newlineRange = buffer.range(of: "\n") {
             let line = String(buffer[buffer.startIndex..<newlineRange.lowerBound])
             buffer = String(buffer[newlineRange.upperBound...])
-            lock.unlock()
-            lineHandler(line)
-            lock.lock()
+            lines.append(line)
         }
         // Also handle \r for yt-dlp progress lines
         while let crRange = buffer.range(of: "\r") {
             let line = String(buffer[buffer.startIndex..<crRange.lowerBound])
             buffer = String(buffer[crRange.upperBound...])
             if !line.isEmpty {
-                lock.unlock()
-                lineHandler(line)
-                lock.lock()
+                lines.append(line)
             }
         }
         lock.unlock()
+
+        // Call handlers outside the lock — safe from re-entrant corruption
+        for line in lines {
+            lineHandler(line)
+        }
     }
 
     func flush(lineHandler: (String) -> Void) {

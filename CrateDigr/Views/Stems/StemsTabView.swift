@@ -2,6 +2,7 @@ import SwiftUI
 
 struct StemsTabView: View {
     @StateObject private var vm = StemsViewModel()
+    @StateObject private var samplerVM = SamplerViewModel()
 
     var body: some View {
         NavigationSplitView {
@@ -16,6 +17,7 @@ struct StemsTabView: View {
                 } else {
                     StemMixerView()
                         .environmentObject(vm)
+                        .environmentObject(samplerVM)
                 }
             }
         }

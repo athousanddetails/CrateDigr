@@ -69,7 +69,13 @@ struct StemTrackRow: View {
             )
             .contentShape(Rectangle())
             .onTapGesture {
-                vm.selectedStemID = stem.id
+                if NSEvent.modifierFlags.contains(.command) {
+                    // Cmd+click: toggle selection (multi-select)
+                    vm.toggleStemSelection(stem.id)
+                } else {
+                    // Plain click: single select
+                    vm.selectedStemIDs = [stem.id]
+                }
             }
 
             // Actions

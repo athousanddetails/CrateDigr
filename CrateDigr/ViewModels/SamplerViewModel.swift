@@ -198,7 +198,7 @@ final class SamplerViewModel: ObservableObject {
     @Published var waveformOffset: CGFloat = 0
 
     @Published var showGrid = false
-    @Published var waveformHeight: CGFloat = 500  // User-resizable waveform height (max by default)
+    @Published var waveformHeight: CGFloat = 250  // User-resizable waveform height (adjustable 80-500)
 
     // MARK: - Services
     let engine = SampleEngine()
@@ -274,18 +274,22 @@ final class SamplerViewModel: ObservableObject {
         loadGeneration += 1
         let myGeneration = loadGeneration
 
+        // Clear old waveform immediately so Metal renderer picks up the change
+        self.waveformLOD = nil
+        self.frequencyColorData = []
+        self.waveformData = []
+        self.stereoWaveformData = []
+
         Task {
             do {
-                // ── Phase 1: INSTANT ──
-                // Load audio samples (single file read, shared with analyzer)
-                var file = try SampleFile.load(from: url)
-
-                // Set provisional BPM=120 so grid/metronome/snap controls ALWAYS appear
-                file.bpm = 120
-
-                // Compute basic waveform (vDSP-accelerated, very fast)
-                let waveform = file.waveformData(bucketCount: 4000)
-                let stereoWaveform = file.waveformDataStereo(bucketCount: 4000)
+                // ── Phase 1: Load file OFF main thread ──
+                let (file, waveform, stereoWaveform) = try await Task.detached(priority: .userInitiated) {
+                    var f = try SampleFile.load(from: url)
+                    f.bpm = 120
+                    let w = f.waveformData(bucketCount: 4000)
+                    let sw = f.waveformDataStereo(bucketCount: 4000)
+                    return (f, w, sw)
+                }.value
 
                 // Check we're still the active load
                 guard self.loadGeneration == myGeneration else { return }

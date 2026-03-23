@@ -279,8 +279,8 @@ final class MetalWaveformRenderer: NSObject, MTKViewDelegate {
     private func selectLODAndUpdateBuffers(viewWidth: Float) {
         guard let vm = viewModel else { return }
 
-        // Detect track change — force full buffer rebuild
-        let currentFileID = vm.sampleFile?.url.lastPathComponent ?? ""
+        // Detect track change — force full buffer rebuild (use full path, not just filename)
+        let currentFileID = vm.sampleFile?.url.path ?? ""
         let fileChanged = currentFileID != lastFileID
         if fileChanged {
             lastFileID = currentFileID
